@@ -105,6 +105,8 @@ def make_handler(run_dir: Path):
         with lock:
             store.snapshot(label)
             fn(store.data)
+            # keep "how sure is each piece" current, so questions reflect every edit
+            I.refresh_confidence(store.data, st["frags"])
             store.save()
             I.export(run_dir)
             return state()
