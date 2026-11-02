@@ -54,6 +54,10 @@ Groups the tracker's pieces by appearance and opens a page with three tabs:
 - **Conflicts** – two pieces with the same name on screen at once. Shows the real frame at the same moment
   with both boxes, a filmstrip of each piece, **✂ cut** (split a piece where it changes bird) and
   **✂ cut out just the overlap**.
+- **Checks** – an automatic audit for mistakes the other tabs can't see: a piece set aside as
+  "several chickens" whose box is really one bird, a named piece whose box grows to two birds,
+  a piece whose look changes part-way (tracker switched birds). Each comes with frames and a
+  one-click fix, or "looks fine" to dismiss. The header shows how many items are left to review.
 
 Every change is saved immediately and can be undone (`↶ Undo` / ⌘Z, last 200 steps in `identity/history/`).
 

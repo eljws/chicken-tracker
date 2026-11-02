@@ -263,3 +263,33 @@ def test_kinematics_dash_and_glitch():
     rows2[20]["cx"] += 300
     k2 = kinematics(pd.DataFrame(rows2), H)
     assert np.isnan(k2["top_speed_m_s"]) or k2["top_speed_m_s"] < 0.5
+
+
+def test_checks_find_single_bird_in_aside_and_merged_box():
+    import pandas as pd
+    from chicken_tracker.checks import run_checks
+    fps = 10.0
+    rows = []
+    # Named reference birds (box 40x40 at y2=400) to learn the single-bird size
+    for f in range(200):
+        rows.append({"frame": f, "time_s": f / fps, "track_id": 1, "x1": 0, "y1": 360, "x2": 40, "y2": 400})
+    # piece 2: named, box doubles in size between frames 50-100 (two birds)
+    for f in range(150):
+        w = 80 if 50 <= f < 100 else 40
+        rows.append({"frame": f, "time_s": f / fps, "track_id": 2, "x1": 200, "y1": 360, "x2": 200 + w, "y2": 400})
+    # piece 3: set aside as several chickens, but one bird's size for 10 s
+    for f in range(100):
+        rows.append({"frame": 300 + f, "time_s": (300 + f) / fps, "track_id": 3, "x1": 400, "y1": 360, "x2": 440, "y2": 400})
+    det = pd.DataFrame(rows)
+    named = det[det.track_id.isin([1, 2])].assign(chicken="X")
+    fr = {1: frag(1, 0, 19.9, A), 2: frag(2, 0, 14.9, A), 3: frag(3, 30, 39.9, A)}
+    d = _data(fr, [[1], [2]]); d["multiple"] = [3]
+    picks = pd.DataFrame({"track_id": [1, 2, 3], "frame": [10, 10, 310]})
+    feats = np.stack([fr[1].emb, fr[2].emb, fr[3].emb])
+    checks = run_checks(d, det, named, picks, feats, fr, fps)
+    kinds = {(c["kind"], c["track"]) for c in checks}
+    assert ("merged_inside", 2) in kinds and ("aside_single", 3) in kinds
+    merged = next(c for c in checks if c["kind"] == "merged_inside")
+    assert 45 <= merged["from_frame"] <= 55 and 95 <= merged["to_frame"] <= 105
+    d["dismissed_checks"] = [merged["key"]]
+    assert all(c["key"] != merged["key"] for c in run_checks(d, det, named, picks, feats, fr, fps))

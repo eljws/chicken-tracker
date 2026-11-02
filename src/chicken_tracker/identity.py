@@ -693,6 +693,24 @@ def resort(data: dict, frags: dict[int, Frag]) -> int:
     return moved
 
 
+def place_piece(data: dict, frags: dict[int, Frag], t: int) -> int | None:
+    """Give an unassigned piece to the best-matching chicken it doesn't clash with (unconfirmed)."""
+    if t not in frags:
+        return None
+    best, best_c = -1.0, None
+    for c in data["chickens"]:
+        members = [frags[m] for m in c["tracks"] if m in frags and m != t]
+        if not members or _conflict([frags[t]], members):
+            continue
+        s = float(_centroid(members) @ frags[t].emb)
+        if s > best:
+            best, best_c = s, c
+    if best_c is not None:
+        best_c["tracks"] = sorted(best_c["tracks"] + [t])
+        return best_c["id"]
+    return None
+
+
 def refresh_confidence(data: dict, frags: dict[int, Frag]) -> None:
     clusters = [[t for t in c["tracks"] if t in frags] for c in data["chickens"]]
     ids = [c["id"] for c in data["chickens"]]

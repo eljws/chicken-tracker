@@ -96,6 +96,20 @@ def build_overlay(run_dir: Path, video: str | None = None) -> dict:
     for f, row in zip(named.frame.to_numpy(), cols):
         frames.setdefault(str(int(f)), []).extend(row.tolist())
 
+    # boxes set aside as "several chickens": drawn as grey "2+ chickens" so birds inside a
+    # merged box don't simply vanish from the overlay
+    groups: dict[str, list[int]] = {}
+    ident_p = run_dir / "identity" / "identity.json"
+    if ident_p.exists():
+        from .identity import load_detections
+        ident = json.loads(ident_p.read_text())
+        multi = set(ident.get("multiple", []))
+        if multi:
+            det = load_detections(run_dir, ident)
+            m = det[det.track_id.isin(multi)]
+            for f, row in zip(m.frame.to_numpy(), m[["x1", "y1", "x2", "y2"]].to_numpy().round().astype(int)):
+                groups.setdefault(str(int(f)), []).extend(row.tolist())
+
     hidden = []
     tl_p = run_dir / "chicken_timeline.csv"
     if tl_p.exists():
@@ -129,7 +143,7 @@ def build_overlay(run_dir: Path, video: str | None = None) -> dict:
         "chickens": [{"name": n, "color": _color(n), **({"summary": summary[n]} if n in summary else {})}
                      for n in names],
         "stations": stations, "hidden": hidden, "moments": moments,
-        "frames": frames,
+        "frames": frames, "groups": groups,
     }
 
 
@@ -140,7 +154,7 @@ def make_handler(run_dir: Path, video_path: Path, source_video: str | None):
 
     def overlay_bytes() -> bytes:
         deps = [run_dir / n for n in ("detections_named.csv", "chicken_timeline.csv", "chickens.csv",
-                                      "fast_moments.csv", "stations.json")]
+                                      "fast_moments.csv", "stations.json", "identity/identity.json")]
         key = tuple(p.stat().st_mtime if p.exists() else 0 for p in deps)
         with lock:
             if cache.get("key") != key:

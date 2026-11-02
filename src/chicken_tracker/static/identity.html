@@ -58,6 +58,7 @@
   <button class="tab on" data-tab="name">1 · Name &amp; merge</button>
   <button class="tab" data-tab="ask">2 · Questions <span id="qcount"></span></button>
   <button class="tab" data-tab="conflicts">3 · Conflicts <span id="ccount"></span></button>
+  <button class="tab" data-tab="checks">4 · Checks <span id="kcount"></span></button>
   <button class="act" id="undo" disabled>↶ Undo</button>
   <button class="act" id="resort" title="Re-sort unconfirmed pieces against your named chickens">↻ Re-sort pieces</button>
   <span class="right" id="status"></span>
@@ -105,10 +106,13 @@ function render() {
   u.disabled = !S.undo.count;
   u.title = S.undo.count ? `Undo: ${S.undo.label}  (⌘Z · ${S.undo.count} steps saved)` : "Nothing to undo";
   $("#ccount").innerHTML = S.conflicts ? `<b style="color:#ff7961">(${S.conflicts})</b>` : "(0)";
+  $("#kcount").innerHTML = S.checks ? `<b style="color:#ffb74d">(${S.checks})</b>` : "(0)";
   const unnamed = S.chickens.filter(c => !c.name).length;
-  $("#status").textContent = `${S.chickens.length} chickens · ${unnamed} unnamed · ${S.answered} answers`;
+  const todo = S.questions + S.conflicts + S.checks;
+  $("#status").innerHTML = (todo ? `<b style="color:#ffb74d">${todo} to review</b> · ` : `<b style="color:#81c784">all reviewed ✓</b> · `) +
+    `${S.chickens.length} chickens · ${unnamed} unnamed · ${S.answered} answers`;
   document.querySelectorAll(".tab").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
-  tab === "name" ? renderName() : tab === "ask" ? renderAsk() : renderConflicts();
+  tab === "name" ? renderName() : tab === "ask" ? renderAsk() : tab === "conflicts" ? renderConflicts() : renderChecks();
 }
 
 function renderName() {
@@ -266,6 +270,44 @@ function renderConflicts() {
     toast("Done ✂ — now label the overlapping bit");
   });
   bindCuts();
+}
+
+let selCheck = null;
+async function renderChecks() {
+  $("#panel").style.display = "none"; window._keys = null;
+  if (!S.checks) { $("#main").innerHTML = `<div class="card"><h3>No checks left 🎉</h3>
+    <div class="meta">Nothing suspicious found: no set-aside piece that's really one bird, no named piece with a
+    two-bird box, no piece that changes look part-way.</div></div>`; return; }
+  let c = S.check;
+  if (selCheck && selCheck !== c.key) {
+    const r = await (await fetch("/api/check/" + encodeURIComponent(selCheck))).json();
+    if (!r.error) c = r; else selCheck = null;
+  }
+  const KIND = { aside_single: "Set aside, but one bird", merged_inside: "Two birds in a named box", swap: "Possible bird swap" };
+  $("#main").innerHTML = `
+    <div class="hint">Automatic checks for mistakes the conflicts and questions can't see. Look at the frames
+      (yellow = the stretch in question) and either apply the suggested fix or mark it as fine.
+      Everything is undoable (⌘Z).</div>
+    <div class="card"><h3><span style="color:#ffb74d">${KIND[c.kind]}</span>
+      <span class="meta">${c.seconds}s affected</span></h3>
+      <div style="font-size:16px;margin:4px 0 10px">${esc(c.title)}</div>
+      <div class="film">${c.strip.map((f, i) => `<img src="/strip/${c.track}/${f}.jpg?v=${S.version}"
+         style="height:110px;margin:2px;border:3px solid ${c.in_range[i] ? "#ffb74d" : "transparent"}">`).join("")}</div>
+      <div class="answers">
+        <button class="act yes" id="kapply">✓ Apply fix: ${esc(c.fix)}</button>
+        <button class="act" id="kok">Looks fine — dismiss</button>
+        <button class="act" id="kskip">Skip for now</button>
+      </div></div>
+    <div class="card"><h3>All checks <span class="meta">(${S.checks}, biggest first — click to open)</span></h3>
+      ${S.check_list.map(x => `<div class="moment" data-k="${esc(x.key)}" style="display:flex;gap:10px;padding:5px;cursor:pointer;
+        border-radius:6px;${x.key === c.key ? "background:#2a2a2a" : ""}"><span class="meta" style="width:60px">${x.seconds}s</span>
+        <span>${esc(x.title)}</span></div>`).join("")}</div>`;
+  $("#kapply").onclick = async () => { toast("Applying… (cutting, new pictures)"); selCheck = null;
+    await api("/api/apply_check", { key: c.key }); toast("Fixed ✓"); };
+  $("#kok").onclick = () => { selCheck = null; api("/api/dismiss_check", { key: c.key }); };
+  $("#kskip").onclick = () => { const i = S.check_list.findIndex(x => x.key === c.key);
+    selCheck = (S.check_list[i + 1] || S.check_list[0]).key; renderChecks(); };
+  document.querySelectorAll(".moment[data-k]").forEach(el => el.onclick = () => { selCheck = el.dataset.k; renderChecks(); });
 }
 
 window.addEventListener("keydown", e => {

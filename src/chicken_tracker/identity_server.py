@@ -12,6 +12,7 @@ from importlib import resources
 from pathlib import Path
 from urllib.parse import unquote
 
+from . import checks as K
 from . import identity as I
 
 STRIP_LEN = 12
@@ -33,6 +34,23 @@ def make_handler(run_dir: Path):
     @functools.lru_cache(maxsize=2048)
     def strip_img(track: int, frame: int, version: int) -> bytes | None:
         return I.piece_frame(store.data["video"], st["det"], track, frame, store.data["fps"])
+
+    def current_checks() -> list[dict]:
+        named_p = run_dir / "detections_named.csv"
+        if not named_p.exists():
+            return []
+        picks = I.pd.read_csv(store.root / "crops.csv")
+        feats = I.np.load(store.root / "features.npy")
+        return K.run_checks(store.data, st["det"], I.pd.read_csv(named_p), picks, feats, st["frags"],
+                            store.data["fps"])
+
+    def _check_view(c: dict) -> dict:
+        frames = I.np.sort(st["det"].loc[st["det"].track_id == c["track"], "frame"].to_numpy())
+        pad = int(3 * store.data["fps"])
+        win = frames[(frames >= c["from_frame"] - pad) & (frames <= c["to_frame"] + pad)]
+        idx = I.np.unique(I.np.linspace(0, len(win) - 1, min(12, len(win))).round().astype(int)) if len(win) else []
+        strip = [int(win[i]) for i in idx]
+        return {**c, "strip": strip, "in_range": [c["from_frame"] <= f <= c["to_frame"] for f in strip]}
 
     def mid_crop(t: int) -> str:
         c = store.data["fragments"][str(t)]["crops"]
@@ -59,7 +77,10 @@ def make_handler(run_dir: Path):
         aside = {reason: [{"track": t, "crop": mid_crop(t)} for t in d.get(key, [])]
                  for reason, key in I.EXCLUDED_KEYS.items()}
         cf = I.conflicts(d)
+        ck = current_checks()
         return {"chickens": chickens, "aside": aside, "fps": d["fps"], "version": st["version"],
+                "checks": len(ck), "check": _check_view(ck[0]) if ck else None,
+                "check_list": [{k: c[k] for k in ("key", "kind", "title", "seconds")} for c in ck[:40]],
                 "undo": store.history(),
                 "conflicts": len(cf), "conflict": _conflict(cf[0]) if cf else None,
                 "questions": len(qs), "next": _question(qs[0]) if qs else None,
@@ -143,6 +164,22 @@ def make_handler(run_dir: Path):
             I.export(run_dir)
             return state()
 
+    def do_apply_check(key: str) -> dict:
+        with lock:
+            check = next((c for c in current_checks() if c["key"] == key), None)
+            if check is None:
+                raise ValueError("that check no longer applies")
+            store.snapshot(f"fix: {check['title'][:80]}", with_features=True)
+            st["det"], to_place = K.apply_check(check, store.data, st["det"], run_dir, I.split_piece)
+            st["frags"] = _frags_from(st["det"])
+            for t in to_place:
+                I.place_piece(store.data, st["frags"], t)
+            I.refresh_confidence(store.data, st["frags"])
+            st["version"] += 1
+            store.save()
+            I.export(run_dir)
+            return state()
+
     def do_split(track: int, frame: int) -> dict:
         with lock:
             store.snapshot(f"cut piece #{track} at {clock(frame)}", with_features=True)
@@ -180,6 +217,10 @@ def make_handler(run_dir: Path):
                 return self._send(page, "text/html; charset=utf-8")
             if path == "/api/state":
                 return self._json(state())
+            m = re.fullmatch(r"/api/check/(.+)", path)
+            if m:
+                c = next((c for c in current_checks() if c["key"] == unquote(m[1])), None)
+                return self._json(_check_view(c) if c else {"error": "gone"})
             m = re.fullmatch(r"/api/piece/(\d+)", path)
             if m and m[1] in store.data["fragments"]:
                 return self._json(piece(int(m[1])))
@@ -215,6 +256,12 @@ def make_handler(run_dir: Path):
                     return self._json(mutate(lambda d: I.resort(d, st["frags"]), "re-sort pieces"))
                 if self.path == "/api/isolate":
                     return self._json(do_isolate(int(body["track"]), int(body["other"])))
+                if self.path == "/api/apply_check":
+                    return self._json(do_apply_check(str(body["key"])))
+                if self.path == "/api/dismiss_check":
+                    k = str(body["key"])
+                    return self._json(mutate(lambda d: d.setdefault("dismissed_checks", []).append(k),
+                                             "check dismissed (looks fine)"))
                 if self.path == "/api/undo":
                     return self._json(do_undo())
                 if self.path == "/api/split":

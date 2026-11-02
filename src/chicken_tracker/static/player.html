@@ -64,6 +64,7 @@
   <label class="tg"><input type="checkbox" data-layer="trails" checked> Trails (last 4 s)</label>
   <label class="tg"><input type="checkbox" data-layer="stations" checked> Feeder &amp; water</label>
   <label class="tg"><input type="checkbox" data-layer="hidden" checked> Hidden-chicken markers</label>
+  <label class="tg"><input type="checkbox" data-layer="groups" checked> "2+ chickens" boxes (unnamed groups)</label>
   <h2>Fastest moments</h2>
   <div id="moments"></div>
 </aside>
@@ -79,7 +80,7 @@
 const v = document.getElementById("v"), ov = document.getElementById("ov"), ctx = ov.getContext("2d");
 const tl = document.getElementById("tl"), tctx = tl.getContext("2d");
 let D = null, focus = null, frame = 0;
-const layers = { boxes: true, trails: true, stations: true, hidden: true };
+const layers = { boxes: true, trails: true, stations: true, hidden: true, groups: true };
 const ST_COL = { feeder: "#ff9800", water: "#29b6f6" }, ACT = { 1: "eating", 2: "drinking" };
 const fmt = s => { s = Math.max(0, Math.floor(s)); return [s / 3600 | 0, (s % 3600) / 60 | 0, s % 60].map(x => String(x).padStart(2, "0")).join(":"); };
 
@@ -183,6 +184,13 @@ function draw() {
     ctx.strokeRect(x1, y1, x2 - x1, y2 - y1); label(st.type.toUpperCase(), x1, y2 + fs + 2, ctx.strokeStyle, 1);
   }
   const now = boxesAt(frame), status = D.chickens.map(() => "away"), visible = new Set();
+  const grp = (D.groups || {})[frame];
+  if (layers.groups && grp) for (let k = 0; k < grp.length; k += 4) {
+    const [x1, y1, x2, y2] = grp.slice(k, k + 4).map(v => v * s);
+    ctx.strokeStyle = "rgba(220,220,220,.8)"; ctx.lineWidth = lw; ctx.setLineDash([4 * devicePixelRatio, 4 * devicePixelRatio]);
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1); ctx.setLineDash([]);
+    label("2+ chickens", x1, y2 + fs + 2, "#ddd", 0.9);
+  }
   if (layers.trails) {
     const back = Math.round(4 * D.fps), pts = D.chickens.map(() => []);
     for (let f = frame - back; f <= frame; f++) for (const o of boxesAt(f)) pts[o.c].push([(o.b[0] + o.b[2]) / 2 * s, o.b[3] * s, f]);
