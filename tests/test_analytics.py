@@ -146,3 +146,36 @@ def test_export_with_objects(tmp_path):
     assert len(labels) == 6                             # frames without the objects pass are left out
     classes = sorted(int(l.split()[0]) for f in labels for l in f.read_text().splitlines())
     assert classes.count(0) == 6 and classes.count(1) == 6 and classes.count(2) == 6
+
+
+def test_player_server_byte_ranges(tmp_path):
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from chicken_tracker.player import make_handler
+
+    video = tmp_path / "v.mp4"
+    video.write_bytes(bytes(range(256)) * 40)            # 10240 bytes
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path, video, None))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}/video.mp4"
+    try:
+        def get(rng=None):
+            req = urllib.request.Request(url, headers={"Range": rng} if rng else {})
+            with urllib.request.urlopen(req) as r:
+                return r.status, r.headers, r.read()
+        st, h, body = get()
+        assert st == 200 and len(body) == 10240 and h["Accept-Ranges"] == "bytes"
+        st, h, body = get("bytes=0-1")                      # Safari's first probe
+        assert st == 206 and body == bytes([0, 1]) and h["Content-Range"] == "bytes 0-1/10240"
+        st, h, body = get("bytes=10000-")
+        assert st == 206 and len(body) == 240 and body[0] == 10000 % 256
+        st, h, body = get("bytes=-16")                      # last 16 bytes
+        assert st == 206 and len(body) == 16 and h["Content-Range"] == "bytes 10224-10239/10240"
+        try:
+            get("bytes=20000-")
+            raise AssertionError("expected 416")
+        except urllib.error.HTTPError as e:
+            assert e.code == 416
+    finally:
+        srv.shutdown()

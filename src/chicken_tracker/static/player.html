@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chicken player</title>
+<style>
+  :root { --bg: #121212; --panel: #1c1c1c; --line: #2e2e2e; --text: #eaeaea; --muted: #9a9a9a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif;
+         display: grid; grid-template-columns: 1fr 300px; grid-template-rows: auto 1fr auto; height: 100vh; }
+  header { grid-column: 1 / -1; display: flex; gap: 14px; align-items: center; padding: 8px 14px;
+           background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  #clock { font-variant-numeric: tabular-nums; font-size: 18px; margin-left: auto; }
+  #stage { position: relative; display: flex; align-items: center; justify-content: center; min-height: 0;
+           min-width: 0; background: #000; }
+  #wrap { position: relative; max-width: 100%; max-height: 100%; }
+  video { display: block; max-width: 100%; max-height: calc(100vh - 170px); }
+  #ov { position: absolute; inset: 0; pointer-events: none; }
+  aside { background: var(--panel); border-left: 1px solid var(--line); overflow: auto; padding: 10px 12px;
+          grid-row: 2 / 4; grid-column: 2; }
+  aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 14px 0 6px; }
+  .hen { display: grid; grid-template-columns: 12px 1fr auto; gap: 8px; align-items: center; padding: 6px 8px;
+         border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
+  .hen:hover { background: #262626; }
+  .hen.on { border-color: #555; background: #262626; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .st { color: var(--muted); font-size: 12px; text-align: right; }
+  .stats { grid-column: 2 / -1; color: var(--muted); font-size: 12px; display: none; }
+  .hen.on .stats { display: block; }
+  label.tg { display: flex; gap: 8px; align-items: center; padding: 3px 0; cursor: pointer; }
+  .moment { display: flex; justify-content: space-between; padding: 4px 8px; border-radius: 6px; cursor: pointer; }
+  .moment:hover { background: #262626; }
+  footer { grid-column: 1; background: var(--panel); border-top: 1px solid var(--line); padding: 8px 14px; }
+  #controls { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; flex-wrap: wrap; }
+  button { background: #2a2a2a; color: var(--text); border: 1px solid #444; border-radius: 6px; padding: 4px 10px;
+           cursor: pointer; font-size: 13px; }
+  button.on { background: #3a5a3a; border-color: #6a9a6a; }
+  #tl { width: 100%; height: 70px; display: block; cursor: pointer; border-radius: 4px; }
+  .keys { color: var(--muted); font-size: 12px; margin-left: auto; }
+  kbd { background: #333; border: 1px solid #555; border-radius: 3px; padding: 0 4px; font-size: 11px; }
+  #loading { position: absolute; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Chicken player</h1>
+  <span id="info" style="color:var(--muted)"></span>
+  <span id="clock">--:--:--</span>
+</header>
+<div id="stage">
+  <span id="loading">Loading…</span>
+  <div id="wrap">
+    <video id="v" src="/video.mp4" preload="auto" muted playsinline></video>
+    <canvas id="ov"></canvas>
+  </div>
+</div>
+<aside>
+  <h2>Chickens <span style="text-transform:none;letter-spacing:0">(click to highlight)</span></h2>
+  <div id="hens"></div>
+  <h2>Show</h2>
+  <label class="tg"><input type="checkbox" data-layer="boxes" checked> Boxes &amp; names</label>
+  <label class="tg"><input type="checkbox" data-layer="trails" checked> Trails (last 4 s)</label>
+  <label class="tg"><input type="checkbox" data-layer="stations" checked> Feeder &amp; water</label>
+  <label class="tg"><input type="checkbox" data-layer="hidden" checked> Hidden-chicken markers</label>
+  <h2>Fastest moments</h2>
+  <div id="moments"></div>
+</aside>
+<footer>
+  <div id="controls">
+    <button id="play">▶ Play</button>
+    <span id="speeds"></span>
+    <span class="keys"><kbd>space</kbd> play · <kbd>←</kbd><kbd>→</kbd> 5 s · <kbd>,</kbd><kbd>.</kbd> frame</span>
+  </div>
+  <canvas id="tl"></canvas>
+</footer>
+<script>
+const v = document.getElementById("v"), ov = document.getElementById("ov"), ctx = ov.getContext("2d");
+const tl = document.getElementById("tl"), tctx = tl.getContext("2d");
+let D = null, focus = null, frame = 0;
+const layers = { boxes: true, trails: true, stations: true, hidden: true };
+const ST_COL = { feeder: "#ff9800", water: "#29b6f6" }, ACT = { 1: "eating", 2: "drinking" };
+const fmt = s => { s = Math.max(0, Math.floor(s)); return [s / 3600 | 0, (s % 3600) / 60 | 0, s % 60].map(x => String(x).padStart(2, "0")).join(":"); };
+
+fetch("/overlay.json").then(r => r.json()).then(d => {
+  D = d;
+  document.getElementById("info").textContent =
+    `${d.chickens.length} chickens · ${d.width}×${d.height} analysed · ${d.fps.toFixed(2)} fps`;
+  buildPanel(); buildTimeline(); resize(); draw();
+});
+
+// ----------------------------------------------------------------- side panel
+function buildPanel() {
+  const hens = document.getElementById("hens");
+  hens.innerHTML = D.chickens.map((c, i) => {
+    const s = c.summary || {};
+    const stats = [s.visible_s != null && `visible ${(s.visible_s / 60).toFixed(1)} min`,
+      s.distance_m != null && `walked ${Math.round(s.distance_m)} m`,
+      s.feeder_time_s != null && `feeder ${(s.feeder_time_s / 60).toFixed(1)} min (${s.feeder_visits} visits)`,
+      s.water_visits != null && `water ${s.water_visits} visits`,
+      s.top_speed_m_s != null && `top speed ${s.top_speed_m_s} m/s`].filter(Boolean).join(" · ");
+    return `<div class="hen" data-i="${i}"><span class="dot" style="background:${c.color}"></span>
+      <b>${c.name}</b><span class="st" id="st${i}">—</span><div class="stats">${stats}</div></div>`;
+  }).join("");
+  hens.querySelectorAll(".hen").forEach(el => el.onclick = () => {
+    const i = +el.dataset.i; focus = focus === i ? null : i;
+    hens.querySelectorAll(".hen").forEach(h => h.classList.toggle("on", +h.dataset.i === focus));
+    draw(); buildTimeline();
+  });
+  document.getElementById("moments").innerHTML = D.moments.length ? D.moments
+    .sort((a, b) => b.speed - a.speed).map(m => `<div class="moment" data-t="${m.at}">
+      <span><span class="dot" style="display:inline-block;background:${D.chickens[m.c].color}"></span>
+      ${D.chickens[m.c].name}</span><span>${m.speed} m/s · ${clockAt(m.at)}</span></div>`).join("")
+    : '<span style="color:var(--muted)">none</span>';
+  document.querySelectorAll(".moment").forEach(el => el.onclick = () => { seek(+el.dataset.t - 1.5); v.play(); });
+  document.querySelectorAll("input[data-layer]").forEach(cb => cb.onchange = () => { layers[cb.dataset.layer] = cb.checked; draw(); });
+  document.getElementById("speeds").innerHTML = [0.5, 1, 2, 4, 8].map(r =>
+    `<button data-r="${r}" class="${r === 1 ? "on" : ""}">${r}×</button>`).join(" ");
+  document.querySelectorAll("#speeds button").forEach(b => b.onclick = () => {
+    v.playbackRate = +b.dataset.r;
+    document.querySelectorAll("#speeds button").forEach(x => x.classList.toggle("on", x === b));
+  });
+}
+const clockAt = t => D && D.clock_start_s != null ? fmt(D.clock_start_s + t) : fmt(t);
+
+// ------------------------------------------------------------- presence timeline
+function buildTimeline() {
+  if (!D) return;
+  const W = tl.clientWidth * devicePixelRatio, H = tl.clientHeight * devicePixelRatio;
+  tl.width = W; tl.height = H;
+  const n = D.chickens.length, rowH = H / n, total = D.frames_total;
+  tctx.fillStyle = "#181818"; tctx.fillRect(0, 0, W, H);
+  const bins = Math.floor(W), seen = D.chickens.map(() => new Uint8Array(bins));
+  for (const f in D.frames) {
+    const a = D.frames[f], b = Math.min(bins - 1, Math.floor(+f / total * bins));
+    for (let k = 0; k < a.length; k += 6) seen[a[k]][b] = 1;
+  }
+  D.chickens.forEach((c, i) => {
+    tctx.fillStyle = c.color; tctx.globalAlpha = focus === null || focus === i ? 0.9 : 0.25;
+    for (let x = 0; x < bins; x++) if (seen[i][x]) tctx.fillRect(x, i * rowH + 1, 1, rowH - 2);
+  });
+  tctx.globalAlpha = 1;
+  tl._base = tctx.getImageData(0, 0, W, H);
+}
+function drawPlayhead() {
+  if (!tl._base) return;
+  tctx.putImageData(tl._base, 0, 0);
+  const x = frame / D.frames_total * tl.width;
+  tctx.fillStyle = "#fff"; tctx.fillRect(x - 1, 0, 2 * devicePixelRatio, tl.height);
+}
+tl.onclick = e => { const r = tl.getBoundingClientRect(); seek((e.clientX - r.left) / r.width * D.frames_total / D.fps); };
+
+// ------------------------------------------------------------------ overlay
+function resize() {
+  ov.width = v.clientWidth * devicePixelRatio; ov.height = v.clientHeight * devicePixelRatio;
+  ov.style.width = v.clientWidth + "px"; ov.style.height = v.clientHeight + "px";
+  draw();
+}
+window.addEventListener("resize", () => { resize(); buildTimeline(); });
+v.addEventListener("loadedmetadata", () => { document.getElementById("loading").remove(); resize(); });
+
+function boxesAt(f) {
+  const a = D.frames[f]; const out = [];
+  if (a) for (let k = 0; k < a.length; k += 6) out.push({ c: a[k], b: [a[k + 1], a[k + 2], a[k + 3], a[k + 4]], st: a[k + 5] });
+  return out;
+}
+
+function draw() {
+  if (!D) return;
+  const W = ov.width, s = W / D.width, t = frame / D.fps;
+  ctx.clearRect(0, 0, ov.width, ov.height);
+  const lw = Math.max(2, 2 * devicePixelRatio), fs = Math.round(13 * devicePixelRatio);
+  ctx.font = `600 ${fs}px system-ui`; ctx.lineJoin = "round";
+  const alpha = i => focus === null || focus === i ? 1 : 0.25;
+  const label = (txt, x, y, col, a) => {
+    ctx.globalAlpha = a; ctx.lineWidth = 4; ctx.strokeStyle = "rgba(0,0,0,.85)"; ctx.strokeText(txt, x, y);
+    ctx.fillStyle = col; ctx.fillText(txt, x, y); ctx.globalAlpha = 1;
+  };
+  if (layers.stations) for (const st of D.stations) {
+    const [x1, y1, x2, y2] = st.box.map(v => v * s);
+    ctx.strokeStyle = ST_COL[st.type] || "#fff"; ctx.lineWidth = lw; ctx.setLineDash([]);
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1); label(st.type.toUpperCase(), x1, y2 + fs + 2, ctx.strokeStyle, 1);
+  }
+  const now = boxesAt(frame), status = D.chickens.map(() => "away"), visible = new Set();
+  if (layers.trails) {
+    const back = Math.round(4 * D.fps), pts = D.chickens.map(() => []);
+    for (let f = frame - back; f <= frame; f++) for (const o of boxesAt(f)) pts[o.c].push([(o.b[0] + o.b[2]) / 2 * s, o.b[3] * s, f]);
+    pts.forEach((p, i) => {
+      if (p.length < 2) return;
+      ctx.globalAlpha = alpha(i) * 0.9; ctx.strokeStyle = D.chickens[i].color; ctx.lineWidth = lw; ctx.beginPath();
+      for (let k = 0; k < p.length; k++) {
+        if (k && p[k][2] - p[k - 1][2] > 8) ctx.moveTo(p[k][0], p[k][1]); else k ? ctx.lineTo(p[k][0], p[k][1]) : ctx.moveTo(p[k][0], p[k][1]);
+      }
+      ctx.stroke(); ctx.globalAlpha = 1;
+    });
+  }
+  for (const o of now) {
+    const c = D.chickens[o.c], [x1, y1, x2, y2] = o.b.map(v => v * s);
+    visible.add(o.c); status[o.c] = o.st ? ACT[o.st] : "visible";
+    if (!layers.boxes) continue;
+    ctx.globalAlpha = alpha(o.c); ctx.strokeStyle = c.color; ctx.lineWidth = focus === o.c ? lw * 1.8 : lw; ctx.setLineDash([]);
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1); ctx.globalAlpha = 1;
+    label(c.name + (o.st ? ` (${ACT[o.st]})` : ""), x1, y1 - 5, c.color, alpha(o.c));
+  }
+  for (const h of D.hidden) {
+    if (t < h.from || t > h.to || visible.has(h.c)) continue;
+    const conf = Math.exp(-(t - h.from) / 20);
+    status[h.c] = `hidden ${Math.round(conf * 100)}%`;
+    if (!layers.hidden) continue;
+    const [x1, y1, x2, y2] = h.box.map(v => v * s), c = D.chickens[h.c];
+    ctx.globalAlpha = alpha(h.c) * (0.35 + 0.65 * conf); ctx.strokeStyle = c.color; ctx.lineWidth = lw;
+    ctx.setLineDash([6 * devicePixelRatio, 5 * devicePixelRatio]); ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
+    label(`${c.name}? ${Math.round(conf * 100)}%`, x1, y1 - 5, c.color, alpha(h.c) * (0.35 + 0.65 * conf));
+  }
+  status.forEach((st, i) => { const el = document.getElementById("st" + i); if (el && el.textContent !== st) el.textContent = st; });
+  document.getElementById("clock").textContent = clockAt(t);
+  drawPlayhead();
+}
+
+// ------------------------------------------------------------ frame sync
+function setFrame(mediaTime) { if (!D) return; frame = Math.round(mediaTime * D.fps); draw(); }
+if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
+  const onFrame = (_, md) => { setFrame(md.mediaTime); v.requestVideoFrameCallback(onFrame); };
+  v.requestVideoFrameCallback(onFrame);
+} else {
+  const loop = () => { setFrame(v.currentTime); requestAnimationFrame(loop); }; loop();
+}
+v.addEventListener("seeked", () => setFrame(v.currentTime));
+
+// ---------------------------------------------------------------- controls
+function seek(t) { v.currentTime = Math.max(0, Math.min(v.duration || 1e9, t)); }
+const playBtn = document.getElementById("play");
+playBtn.onclick = () => v.paused ? v.play() : v.pause();
+v.addEventListener("play", () => playBtn.textContent = "❚❚ Pause");
+v.addEventListener("pause", () => playBtn.textContent = "▶ Play");
+window.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT") return;
+  const fd = D ? 1 / D.fps : 0.064;
+  if (e.key === " ") { e.preventDefault(); playBtn.click(); }
+  else if (e.key === "ArrowRight") seek(v.currentTime + 5);
+  else if (e.key === "ArrowLeft") seek(v.currentTime - 5);
+  else if (e.key === ".") { v.pause(); seek(v.currentTime + fd); }
+  else if (e.key === ",") { v.pause(); seek(v.currentTime - fd); }
+});
+</script>
+</body>
+</html>

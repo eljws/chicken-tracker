@@ -73,7 +73,20 @@ Distances in metres need `output/<video>/calibration.json` (image → ground hom
 For camera 04 it was fitted to the 600 mm patio slabs (`calibration.refine_to_joints`) and
 cross-checked against a 2 L bottle (0.33 m); copy it to other runs from the same camera.
 
-### 5. Check it
+### 5. Watch it in a browser
+
+```bash
+uv run chicken-tracker player output/cam1 [--denoise]
+```
+
+Makes a small browser copy of the video once (1280×1024 H.264, 10 s keyframes, every frame kept and
+re-timed to exactly `frame / fps`; ~35% of the camera file, ~26% with `--denoise`) and serves a page
+that draws boxes, names, trails, feeder/water and hidden-chicken markers **live on top** of it from
+the analysis data. Recognition stays on the full-quality original; fixing a name in the naming page
+shows up on reload without re-encoding. Click a chicken to highlight her, click the presence
+timeline or a "fastest moment" to jump.
+
+### 6. Check it (burned-in clip)
 
 ```bash
 uv run chicken-tracker preview output/cam1 --start 17:30 --duration 3:00

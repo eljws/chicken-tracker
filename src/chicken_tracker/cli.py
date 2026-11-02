@@ -1,4 +1,4 @@
-"""Command-line interface: ``chicken-tracker {process,analyze,snapshot,mine,review,train,identify,preview,stations}``."""
+"""Command-line interface: ``chicken-tracker {process,analyze,snapshot,mine,review,train,identify,preview,stations,player}``."""
 
 from __future__ import annotations
 
@@ -143,6 +143,27 @@ def cmd_stations(a: argparse.Namespace) -> None:
                                   min_visit_s=a.min_visit_s))
 
 
+def cmd_player(a: argparse.Namespace) -> None:
+    from . import player
+
+    meta = json.loads((a.run_dir / "meta.json").read_text())
+    src = Path(a.video) if a.video else Path(meta["video"]["path"])
+    fps = meta["video"]["fps"]
+    out = a.run_dir / "browser" / f"video_{a.width}{'_dn' if a.denoise else ''}.mp4"
+    if a.reencode or not out.exists():
+        if not src.exists():
+            sys.exit(f"Source video not found: {src} - pass --video if it moved.")
+        print(f"Encoding browser copy -> {out} (one-off; ~1/7 of the video's length)")
+        player.compress_for_browser(src, out, fps, width=a.width, denoise=a.denoise)
+        n_src, n_out = player.count_frames(src), player.count_frames(out)
+        status = "OK" if n_src == n_out else "MISMATCH - overlay may drift"
+        print(f"Frames: original {n_src}, browser copy {n_out} -> {status}")
+        print(f"Size: {src.stat().st_size / 1e6:.0f} MB -> {out.stat().st_size / 1e6:.0f} MB "
+              f"({100 * out.stat().st_size / src.stat().st_size:.0f}%)")
+    if not a.encode_only:
+        player.serve(a.run_dir, out, str(src), port=a.port, open_browser=not a.no_browser)
+
+
 def _print_summary(name: str, summary: dict, out_dir: Path) -> None:
     brief = {k: v for k, v in summary.items() if k != "video"}
     print(f"\n== {name} ==\n{json.dumps(brief, indent=2)}\nOutputs: {out_dir}/\n")
@@ -227,6 +248,17 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--margin", type=float, default=30.0, help="px around a station that still counts as at it")
     p.add_argument("--min-visit-s", type=float, default=2.0)
     p.set_defaults(func=cmd_stations)
+
+    p = sub.add_parser("player", help="browser player: small video + live overlay from the analysis")
+    p.add_argument("run_dir", type=Path)
+    p.add_argument("--video", type=Path, help="source video, if it moved since `process`")
+    p.add_argument("--width", type=int, default=1280)
+    p.add_argument("--denoise", action="store_true", help="strong temporal filter: ~26%% instead of ~35%% size")
+    p.add_argument("--reencode", action="store_true", help="re-make the browser copy")
+    p.add_argument("--encode-only", action="store_true")
+    p.add_argument("--port", type=int, default=8770)
+    p.add_argument("--no-browser", action="store_true")
+    p.set_defaults(func=cmd_player)
 
     p = sub.add_parser("preview", help="render a short video with boxes, names, trails")
     p.add_argument("run_dir", type=Path)
