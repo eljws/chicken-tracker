@@ -12,8 +12,11 @@ from urllib.parse import unquote
 from .labeling import LabelStore
 
 
-def make_handler(store: LabelStore):
-    page = (resources.files("chicken_tracker") / "static" / "review.html").read_bytes()
+def make_handler(store: LabelStore, objects: bool = False):
+    """objects=True: the feeder/water pass over frames whose chickens are already reviewed."""
+    page = (resources.files("chicken_tracker") / "static" /
+            ("objects.html" if objects else "review.html")).read_bytes()
+    key = "obj_status" if objects else "status"
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # keep the terminal quiet
@@ -39,8 +42,9 @@ def make_handler(store: LabelStore):
                 return self._send(page, "text/html; charset=utf-8")
             if self.path == "/api/items":
                 items = [{"name": k, **v} for k, v in sorted(
-                    store.items.items(), key=lambda kv: (kv[1]["video"], kv[1]["frame"]))]
-                return self._json({"items": items, "counts": store.counts()})
+                    store.items.items(), key=lambda kv: (kv[1]["video"], kv[1]["frame"]))
+                    if key in v]
+                return self._json({"items": items, "counts": store.counts(key)})
             if self.path.startswith("/img/"):
                 name = self._safe_name(self.path[5:])
                 if name is None:
@@ -58,20 +62,27 @@ def make_handler(store: LabelStore):
             status = body.get("status")
             if status not in ("done", "skipped", "pending"):
                 return self._json({"error": "bad status"}, 400)
-            store.update(name, status, body.get("boxes", []))
-            self._json({"ok": True, "counts": store.counts()})
+            if objects:
+                store.update_objects(name, status, body.get("objects", []), body.get("rejected", []))
+            else:
+                store.update(name, status, body.get("boxes", []))
+            self._json({"ok": True, "counts": store.counts(key)})
 
     return Handler
 
 
-def serve(root: Path, port: int = 8765, open_browser: bool = True) -> None:
+def serve(root: Path, port: int = 8765, open_browser: bool = True, objects: bool = False) -> None:
     store = LabelStore(root)
     if not store.items:
         raise SystemExit(f"No frames in {root}. Run `chicken-tracker mine` first.")
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(store))
+    key = "obj_status" if objects else "status"
+    c = store.counts(key)
+    if objects and not sum(c.values()):
+        raise SystemExit(f"No feeder/water suggestions yet. Run `chicken-tracker mine --objects -d {root}` first.")
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(store, objects))
     url = f"http://127.0.0.1:{port}/"
-    c = store.counts()
-    print(f"Reviewing {len(store.items)} frames ({c['pending']} pending) at {url}  - Ctrl+C to stop")
+    what = "feeder/water in" if objects else "chickens in"
+    print(f"Reviewing {what} {sum(c.values())} frames ({c['pending']} pending) at {url}  - Ctrl+C to stop")
     if open_browser:
         webbrowser.open(url)
     try:
@@ -80,4 +91,4 @@ def serve(root: Path, port: int = 8765, open_browser: bool = True) -> None:
         pass
     finally:
         server.server_close()
-        print(f"\nSaved. {store.counts()}")
+        print(f"\nSaved. {store.counts(key)}")

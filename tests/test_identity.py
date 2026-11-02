@@ -1,3 +1,4 @@
+import pytest
 import numpy as np
 
 from chicken_tracker import identity as I
@@ -209,3 +210,56 @@ def test_overlap_cuts_isolate_the_overlap():
         _, det = I.register_split(d, det, 1, f)
     new = d["splits"][-1]["new"]
     assert det[det.track_id == new].frame.tolist() == list(range(40, 50))
+
+
+def test_station_visits():
+    import pandas as pd
+    from chicken_tracker.stations import station_visits
+    fps = 10
+    rows = []
+    # Rocky at the feeder 0-5 s, away 5-6 s (short gap, merged), back 6-9 s; Salt walks past for 1 s
+    for f in list(range(0, 50)) + list(range(60, 90)):
+        rows.append({"chicken": "Rocky", "frame": f, "time_s": f / fps, "x1": 100, "y1": 100, "x2": 140, "y2": 140})
+    for f in range(0, 10):
+        rows.append({"chicken": "Salt", "frame": f, "time_s": f / fps, "x1": 150, "y1": 100, "x2": 190, "y2": 140})
+    named = pd.DataFrame(rows)
+    st = [{"id": "feeder 1", "type": "feeder", "box": [130, 110, 160, 130]}]
+    v = station_visits(named, st, fps, margin=0, gap_s=2.0, min_visit_s=2.0)
+    assert v.chicken.tolist() == ["Rocky"]                    # Salt's 1 s pass is too short
+    assert v.duration_s.iloc[0] == pytest.approx(9.0)          # 0-8.9 s merged across the 1 s gap
+
+
+def test_walked_metres_ignores_jitter_and_gaps():
+    import pandas as pd
+    from chicken_tracker.calibration import walked_metres
+    H = np.diag([0.01, 0.01, 1.0])                      # 100 px = 1 m
+    rng = np.random.default_rng(0)
+    rows = [{"track_id": 1, "frame": f, "cx": 100 + f * 10 + rng.normal(0, 3), "y2": 500 + rng.normal(0, 3)}
+            for f in range(50)]                          # walks 4.9 m with +-3 px jitter
+    rows += [{"track_id": 2, "frame": 100 + f, "cx": 2000, "y2": 500} for f in range(20)]  # far away, standing
+    d = pd.DataFrame(rows)
+    m = walked_metres(d, H)
+    assert 4.6 < m < 5.3                                  # jitter mostly removed, no jump to track 2
+
+
+def test_kinematics_dash_and_glitch():
+    import pandas as pd
+    from chicken_tracker.calibration import kinematics
+    H = np.diag([0.01, 0.01, 1.0])           # 100 px = 1 m
+    fps = 15.625
+    rows = []
+    x = 100.0
+    for f in range(160):                      # stand 3 s, dash at 2 m/s for 1.5 s, stand again
+        t = f / fps
+        if 47 <= f < 70:
+            x += 200 / fps
+        rows.append({"track_id": 1, "frame": f, "time_s": t, "cx": x, "y2": 500.0})
+    k = kinematics(pd.DataFrame(rows), H)
+    assert 1.8 < k["top_speed_m_s"] < 2.1
+    assert 1.5 < k["top_speed_at_s"] < 4.6
+    assert k["top_accel_m_s2"] > 2.0 and k["top_speed_piece"] == 1
+    # a one-frame 3 m teleport (tracker glitch) must not become the top speed
+    rows2 = [dict(r, track_id=2) for r in rows[:40]]
+    rows2[20]["cx"] += 300
+    k2 = kinematics(pd.DataFrame(rows2), H)
+    assert np.isnan(k2["top_speed_m_s"]) or k2["top_speed_m_s"] < 0.5

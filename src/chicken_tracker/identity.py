@@ -754,6 +754,10 @@ def export(run_dir: Path, max_hidden_s: float = 120.0, hidden_tau_s: float = 20.
                    .sort_values(["chicken", "frame", "partial", "conf"], ascending=[True, True, True, False])
                    .drop_duplicates(["chicken", "frame"]))
 
+    from .calibration import kinematics, load_calibration, walked_metres
+    moments = []
+    H_ground = load_calibration(run_dir)
+
     segs, rows = [], []
     for c in data["chickens"]:
         name = c["name"] or f"Chicken {c['id'] + 1}"
@@ -776,10 +780,20 @@ def export(run_dir: Path, max_hidden_s: float = 120.0, hidden_tau_s: float = 20.
         d = per_chicken[per_chicken.chicken == name]
         if len(d):
             step = np.hypot(d.cx.diff(), d.cy.diff()).where(d.track_id.eq(d.track_id.shift()), 0)
-            rows.append({"chicken": name, "fragments": len(tracks),
-                         "first_seen_s": d.time_s.min(), "last_seen_s": d.time_s.max(),
-                         "visible_s": len(d) / fps,
-                         "distance_px": float(step.fillna(0).sum())})
+            row = {"chicken": name, "fragments": len(tracks),
+                   "first_seen_s": d.time_s.min(), "last_seen_s": d.time_s.max(),
+                   "visible_s": len(d) / fps,
+                   "distance_px": float(step.fillna(0).sum())}
+            if H_ground is not None:
+                row["distance_m"] = walked_metres(d, H_ground)
+                row["speed_m_per_min"] = row["distance_m"] / (row["visible_s"] / 60)
+                # partial / too-big boxes change shape, which fakes movement: leave them out
+                k = kinematics(d[~d.partial], H_ground)
+                row.update({key: k[key] for key in ("top_speed_m_s", "top_speed_at_s", "top_speed_piece",
+                                                    "brisk_speed_m_s", "top_accel_m_s2", "top_accel_at_s",
+                                                    "top_accel_piece")})
+                moments += [{"chicken": name, **m} for m in k["moments"]]
+            rows.append(row)
     timeline = pd.DataFrame(segs).sort_values(["chicken", "start_s"]) if segs else pd.DataFrame()
     summary = pd.DataFrame(rows)
     if len(timeline):
@@ -788,11 +802,15 @@ def export(run_dir: Path, max_hidden_s: float = 120.0, hidden_tau_s: float = 20.
     per_chicken.sort_values("frame").to_csv(run_dir / "detections_named.csv", index=False, float_format="%.2f")
     timeline.to_csv(run_dir / "chicken_timeline.csv", index=False, float_format="%.2f")
     summary.to_csv(run_dir / "chickens.csv", index=False, float_format="%.2f")
+    if moments:
+        pd.DataFrame(moments).to_csv(run_dir / "fast_moments.csv", index=False, float_format="%.2f")
     open_conflicts = conflicts(data)
     flagged = [{"track_id": t, "reason": reason, "chicken": ""} for reason, key in EXCLUDED_KEYS.items()
                for t in data.get(key, [])]
     flagged += [{"track_id": t, "reason": f, "chicken": owner.get(t, "")}
                 for f in BOX_FLAGS for t in sorted(data.get(f, []))]
+    from .stations import write_station_analytics
+    write_station_analytics(run_dir, fps)
     pd.DataFrame(flagged, columns=["track_id", "reason", "chicken"]).to_csv(run_dir / "flagged_pieces.csv", index=False)
     return {"chickens": len(summary), "timeline_segments": len(timeline),
             "not_chicken": len(data.get("rejected", [])), "multiple": len(data.get("multiple", [])),

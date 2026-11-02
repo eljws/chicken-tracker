@@ -9,7 +9,13 @@ Everything lives in one dataset folder::
 
     dataset/
       images/<video>__f<frame>.jpg
-      labels.json   {image: {video, frame, time_s, proposals, boxes, status}}
+      labels.json   {image: {video, frame, time_s, proposals, boxes, status,
+                             obj_proposals, objects, obj_status}}
+
+Chickens (class 0) are reviewed in the first pass. Feeders and water (classes 1, 2) are
+reviewed in a separate "objects" pass over the same frames (``review --objects``); once any
+frame has objects reviewed, training uses only frames where both passes are done, so no
+frame teaches the model that an unlabelled feeder is background.
 """
 
 from __future__ import annotations
@@ -25,6 +31,11 @@ from pathlib import Path
 import cv2
 
 OPEN_VOCAB_HINTS = ("yoloe", "world")
+
+CLASSES = {0: "chicken", 1: "feeder", 2: "water"}
+# text prompts per object class for the open-vocabulary proposal model
+OBJECT_PROMPTS = {1: ["feed tray", "bowl of chicken feed", "chicken feeder"],
+                  2: ["plastic bottle", "chicken waterer", "water bowl"]}
 
 
 class LabelStore:
@@ -50,10 +61,25 @@ class LabelStore:
             self.items[name]["boxes"] = [[round(float(v), 1) for v in b[:4]] for b in boxes]
         self.save()
 
-    def counts(self) -> dict[str, int]:
+    def update_objects(self, name: str, status: str, objects: list[list[float]],
+                       rejected: list[list[float]] = ()) -> None:
+        """objects: [[x1, y1, x2, y2, cls], ...] with cls in OBJECT_PROMPTS.
+
+        rejected: suggestion boxes the human turned down - remembered so the same spot
+        (static camera) starts out rejected in other frames.
+        """
+        with self._lock:
+            self.items[name]["obj_status"] = status
+            self.items[name]["objects"] = [[*(round(float(v), 1) for v in b[:4]), int(b[4])]
+                                           for b in objects if int(b[4]) in OBJECT_PROMPTS]
+            self.items[name]["obj_rejected"] = [[round(float(v), 1) for v in b[:4]] for b in rejected]
+        self.save()
+
+    def counts(self, key: str = "status") -> dict[str, int]:
         out = {"pending": 0, "done": 0, "skipped": 0}
         for it in self.items.values():
-            out[it["status"]] = out.get(it["status"], 0) + 1
+            if key in it:
+                out[it[key]] = out.get(it[key], 0) + 1
         return out
 
 
@@ -142,6 +168,36 @@ def mine(
             "added": len(keep), "total_in_dataset": len(store.items)}
 
 
+def mine_objects(root: Path, model: str = "yoloe-11l-seg.pt", conf: float = 0.05,
+                 imgsz: int = 1280, max_boxes: int = 8, device: str | None = None) -> dict:
+    """Add feeder/water suggestions to every frame already in the dataset."""
+    store = LabelStore(root)
+    prompts, prompt_cls = [], []
+    for cls, ps in OBJECT_PROMPTS.items():
+        prompts += ps
+        prompt_cls += [cls] * len(ps)
+    det = load_detector(model, prompts)
+    trained = not any(h in Path(model).name.lower() for h in OPEN_VOCAB_HINTS)
+    # only frames whose chickens are reviewed: those are the ones training can use
+    todo = [k for k, v in store.items.items() if v["status"] == "done" and v.get("obj_status") != "done"]
+    for i, name in enumerate(todo):
+        img = cv2.imread(str(store.images / name))
+        r = det.predict(img, conf=conf, imgsz=imgsz, device=device, agnostic_nms=True,
+                        max_det=50 if trained else max_boxes, verbose=False)[0]
+        props = []
+        for b, c, k in zip(r.boxes.xyxy.cpu().numpy(), r.boxes.conf.cpu().numpy(), r.boxes.cls.cpu().numpy()):
+            cls = int(k) if trained else prompt_cls[int(k)]
+            if cls in OBJECT_PROMPTS:
+                props.append([*(round(float(v), 1) for v in b), round(float(c), 3), cls])
+        store.items[name]["obj_proposals"] = props[:max_boxes]
+        store.items[name].setdefault("objects", [])
+        store.items[name]["obj_status"] = "pending"
+        if i % 50 == 0:
+            print(f"  {i}/{len(todo)}", flush=True)
+    store.save()
+    return {"frames": len(todo), "with_suggestions": sum(1 for k in todo if store.items[k]["obj_proposals"])}
+
+
 def _spread(items: list, n: int) -> list:
     """Pick n items evenly spaced through a time-ordered list (avoids near-duplicates)."""
     if n >= len(items):
@@ -179,6 +235,11 @@ def export_yolo(root: Path, class_name: str = "chicken") -> Path:
     done = {k: v for k, v in store.items.items() if v["status"] == "done"}
     if not done:
         raise SystemExit("No reviewed frames yet - run `chicken-tracker review` first.")
+    with_objects = any(v.get("obj_status") == "done" for v in store.items.values())
+    if with_objects:
+        # only frames where feeders/water were reviewed too, else they'd be learnt as background
+        done = {k: v for k, v in done.items() if v.get("obj_status") == "done"}
+    names = CLASSES if with_objects else {0: class_name}
 
     splits = split_train_val(done)
 
@@ -196,15 +257,18 @@ def export_yolo(root: Path, class_name: str = "chicken") -> Path:
         except OSError:
             shutil.copy2(src, dst)
         lines = []
-        for x1, y1, x2, y2 in it["boxes"]:
+        boxes = [(*b[:4], 0) for b in it["boxes"]]
+        if with_objects:
+            boxes += [tuple(o) for o in it.get("objects", [])]
+        for x1, y1, x2, y2, cls in boxes:
             cx, cy = (x1 + x2) / 2 / w, (y1 + y2) / 2 / h
             bw, bh = abs(x2 - x1) / w, abs(y2 - y1) / h
-            lines.append(f"0 {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
+            lines.append(f"{int(cls)} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
         (out / "labels" / split / (Path(name).stem + ".txt")).write_text("\n".join(lines))
 
     data = out / "data.yaml"
     data.write_text(f"path: {out.resolve()}\ntrain: images/train\nval: images/val\n"
-                    f"names:\n  0: {class_name}\n")
+                    "names:\n" + "".join(f"  {k}: {v}\n" for k, v in names.items()))
     n_val = sum(1 for s in splits.values() if s == "val")
     print(f"Exported {len(done)} frames ({len(done) - n_val} train / {n_val} val) -> {data}")
     return data

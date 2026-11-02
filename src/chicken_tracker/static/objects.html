@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Feeders &amp; water</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #141414; color: #eee; font: 14px/1.4 system-ui, sans-serif;
+         display: flex; flex-direction: column; height: 100vh; }
+  header { display: flex; gap: 18px; align-items: center; padding: 8px 14px; background: #1f1f1f; flex-wrap: wrap; }
+  header .q { font-size: 18px; font-weight: 600; }
+  .keys span { margin-right: 12px; color: #bbb; }
+  kbd { background: #333; border: 1px solid #555; border-radius: 4px; padding: 0 6px; color: #fff; }
+  .right { margin-left: auto; text-align: right; color: #bbb; }
+  #bar { height: 4px; background: #333; }
+  #bar div { height: 100%; background: #29b6f6; width: 0; transition: width .2s; }
+  #wrap { flex: 1; display: flex; justify-content: center; align-items: center; min-height: 0; padding: 8px; }
+  canvas { max-width: 100%; max-height: 100%; cursor: crosshair; }
+  #drawing { padding: 3px 10px; border-radius: 6px; font-weight: 600; }
+  #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #333;
+           padding: 8px 16px; border-radius: 6px; opacity: 0; transition: opacity .3s; }
+</style>
+</head>
+<body>
+<header>
+  <div class="q">Box every feeder and water — and nothing else</div>
+  <div class="keys">
+    <span><kbd>Y</kbd>/<kbd>Enter</kbd> correct, save</span>
+    <span><kbd>N</kbd> none in this frame</span>
+    <span>click box = reject/accept</span>
+    <span>right-click box = switch feeder ⇄ water</span>
+    <span>drag = add a <span id="drawing"></span> (<kbd>2</kbd> feeder <kbd>3</kbd> water)</span>
+    <span><kbd>Z</kbd> undo add</span>
+    <span><kbd>S</kbd> skip</span>
+    <span><kbd>←</kbd><kbd>→</kbd> browse</span>
+  </div>
+  <div class="right"><div id="prog"></div><div id="meta"></div></div>
+</header>
+<div id="bar"><div></div></div>
+<div id="wrap"><canvas id="c"></canvas></div>
+<div id="toast"></div>
+<script>
+const CLS = { 1: { name: "feeder", color: "#ff9800" }, 2: { name: "water", color: "#29b6f6" } };
+const NO = "#f44336";
+const canvas = document.getElementById("c"), ctx = canvas.getContext("2d");
+let items = [], idx = 0, img = new Image(), boxes = [], chickens = [], drag = null, counts = {}, drawCls = 1;
+
+function setDrawCls(c) {
+  drawCls = c;
+  const d = document.getElementById("drawing");
+  d.textContent = CLS[c].name; d.style.background = CLS[c].color; d.style.color = "#111";
+}
+
+async function load() {
+  const r = await (await fetch("/api/items")).json();
+  items = r.items; counts = r.counts;
+  const first = items.findIndex(it => it.obj_status === "pending");
+  show(first >= 0 ? first : 0);
+}
+
+const iou = (a, b) => {
+  const w = Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])), h = Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
+  const i = w * h; return i / (area(a) + area(b) - i + 1e-9);
+};
+// The camera is static: reuse the human's earlier decisions at the same spot in the same video.
+function remembered(it, box) {
+  let best = null, bestIou = 0.5;
+  for (const o of items) {
+    if (o === it || o.video !== it.video || o.obj_status !== "done") continue;
+    for (const a of o.objects || []) { const v = iou(a, box); if (v > bestIou) { bestIou = v; best = { state: "yes", cls: a[4] }; } }
+    for (const r of o.obj_rejected || []) { const v = iou(r, box); if (v > bestIou) { bestIou = v; best = { state: "no" }; } }
+  }
+  return best;
+}
+
+function show(i) {
+  idx = Math.max(0, Math.min(items.length - 1, i));
+  const it = items[idx];
+  chickens = it.boxes || [];
+  if (it.obj_status === "pending") {
+    boxes = (it.obj_proposals || []).map(p => {
+      const bx = { b: p.slice(0, 4), conf: p[4], cls: p[5], state: "pending" };
+      const m = remembered(it, bx.b);
+      if (m) { bx.state = m.state; if (m.cls) bx.cls = m.cls; bx.auto = true; }
+      return bx;
+    });
+  } else {
+    boxes = (it.objects || []).map(o => ({ b: o.slice(0, 4), cls: o[4], state: "yes", user: true }));
+  }
+  img = new Image();
+  img.onload = () => { canvas.width = img.naturalWidth; canvas.height = img.naturalHeight; draw(); };
+  img.src = "/img/" + encodeURIComponent(it.name);
+  const done = counts.done + counts.skipped, total = items.length;
+  document.getElementById("prog").textContent = `${done} / ${total} reviewed · frame ${idx + 1}`;
+  document.querySelector("#bar div").style.width = (100 * done / total) + "%";
+  const t = Math.round(it.time_s), mm = String(Math.floor(t / 60)).padStart(2, "0"), ss = String(t % 60).padStart(2, "0");
+  document.getElementById("meta").textContent = `${it.video.split("/").pop()} @ ${mm}:${ss} · ${it.obj_status}`;
+}
+
+function draw() {
+  ctx.drawImage(img, 0, 0);
+  const lw = Math.max(2, canvas.width / 500), fs = Math.max(14, canvas.width / 70);
+  ctx.font = `bold ${fs}px system-ui`;
+  // chickens: reference only
+  ctx.lineWidth = 1; ctx.strokeStyle = "rgba(200,200,200,.6)"; ctx.setLineDash([]);
+  for (const [x1, y1, x2, y2] of chickens) ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+  for (const bx of boxes) {
+    const [x1, y1, x2, y2] = bx.b, col = bx.state === "no" ? NO : CLS[bx.cls].color;
+    ctx.lineWidth = lw; ctx.strokeStyle = col;
+    ctx.setLineDash(bx.state === "pending" ? [lw * 4, lw * 2] : []);
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    if (bx.state === "no") {
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.moveTo(x2, y1); ctx.lineTo(x1, y2); ctx.stroke();
+    }
+    ctx.fillStyle = col;
+    const txt = (bx.state === "no" ? "not " : "") + CLS[bx.cls].name +
+      (bx.state === "pending" && bx.conf !== undefined ? ` ${Math.round(bx.conf * 100)}%` : "") + (bx.auto ? " (remembered)" : "");
+    ctx.fillText(txt, x1, y1 - 4);
+  }
+  ctx.setLineDash([]);
+  if (drag && drag.moved) {
+    ctx.strokeStyle = CLS[drawCls].color; ctx.lineWidth = lw;
+    ctx.strokeRect(drag.x0, drag.y0, drag.x - drag.x0, drag.y - drag.y0);
+  }
+}
+
+function pos(e) {
+  const r = canvas.getBoundingClientRect();
+  return [(e.clientX - r.left) * canvas.width / r.width, (e.clientY - r.top) * canvas.height / r.height];
+}
+const area = b => (b[2] - b[0]) * (b[3] - b[1]);
+function hitAt(x, y) {
+  return boxes.filter(bx => x >= bx.b[0] && x <= bx.b[2] && y >= bx.b[1] && y <= bx.b[3])
+    .sort((a, b) => area(a.b) - area(b.b))[0];
+}
+
+canvas.addEventListener("contextmenu", e => {
+  e.preventDefault();
+  const [x, y] = pos(e), h = hitAt(x, y);
+  if (h) { h.cls = h.cls === 1 ? 2 : 1; if (h.state === "no") h.state = "yes"; draw(); }
+});
+canvas.addEventListener("mousedown", e => {
+  if (e.button !== 0) return;
+  const [x, y] = pos(e); drag = { x0: x, y0: y, x, y, moved: false };
+});
+window.addEventListener("mousemove", e => {
+  if (!drag) return;
+  const [x, y] = pos(e); drag.x = x; drag.y = y;
+  if (Math.hypot(x - drag.x0, y - drag.y0) > canvas.width / 200) drag.moved = true;
+  draw();
+});
+window.addEventListener("mouseup", () => {
+  if (!drag) return;
+  const d = drag; drag = null;
+  if (d.moved) {
+    const b = [Math.min(d.x0, d.x), Math.min(d.y0, d.y), Math.max(d.x0, d.x), Math.max(d.y0, d.y)].map(v => Math.max(0, v));
+    b[2] = Math.min(b[2], canvas.width); b[3] = Math.min(b[3], canvas.height);
+    boxes.push({ b, cls: drawCls, state: "yes", user: true });
+  } else {
+    const h = hitAt(d.x0, d.y0);
+    if (h) h.state = h.state === "no" ? "yes" : "no";
+  }
+  draw();
+});
+
+async function save(status, keep) {
+  const it = items[idx];
+  const kept = keep ? boxes.filter(bx => bx.state !== "no").map(bx => [...bx.b, bx.cls]) : [];
+  // suggestions turned down (all of them on N) are remembered as "not a feeder/water here"
+  const rejected = status === "done" ? boxes.filter(bx => !bx.user && (!keep || bx.state === "no")).map(bx => bx.b) : [];
+  const r = await (await fetch("/api/item/" + encodeURIComponent(it.name), {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status, objects: kept, rejected }),
+  })).json();
+  it.obj_status = status; it.objects = kept; it.obj_rejected = rejected; counts = r.counts;
+  const nf = kept.filter(o => o[4] === 1).length, nw = kept.filter(o => o[4] === 2).length;
+  toast(status === "skipped" ? "skipped" : `saved · ${nf} feeder, ${nw} water`);
+  const next = items.findIndex((x, j) => j > idx && x.obj_status === "pending");
+  if (next >= 0) show(next);
+  else { const any = items.findIndex(x => x.obj_status === "pending"); any >= 0 ? show(any) : (show(idx), toast("All frames reviewed 🎉 — tell Claude to train")); }
+}
+
+let tt;
+function toast(msg) {
+  const t = document.getElementById("toast"); t.textContent = msg; t.style.opacity = 1;
+  clearTimeout(tt); tt = setTimeout(() => t.style.opacity = 0, 1300);
+}
+
+window.addEventListener("keydown", e => {
+  const k = e.key.toLowerCase();
+  if (k === "y" || k === "enter") save("done", true);
+  else if (k === "n") save("done", false);
+  else if (k === "s") save("skipped", false);
+  else if (k === "2") setDrawCls(1);
+  else if (k === "3") setDrawCls(2);
+  else if (k === "z") { const i = boxes.map(b => !!b.user).lastIndexOf(true); if (i >= 0) { boxes.splice(i, 1); draw(); } }
+  else if (k === "arrowright") show(idx + 1);
+  else if (k === "arrowleft") show(idx - 1);
+  else return;
+  e.preventDefault();
+});
+
+setDrawCls(1);
+load();
+</script>
+</body>
+</html>

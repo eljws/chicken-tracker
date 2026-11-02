@@ -119,3 +119,30 @@ def test_split_has_chickens_in_val():
     val = [k for k, v in s.items() if v == "val"]
     assert any(items[k]["boxes"] for k in val) and any(not items[k]["boxes"] for k in val)
     assert 0.15 < len(val) / len(items) < 0.25
+
+
+def test_export_with_objects(tmp_path):
+    import json
+    import cv2
+    from chicken_tracker.labeling import LabelStore, export_yolo
+
+    (tmp_path / "images").mkdir()
+    items = {}
+    for i in range(10):
+        name = f"v__f{i:07d}.jpg"
+        cv2.imwrite(str(tmp_path / "images" / name), np.zeros((100, 200, 3), np.uint8))
+        items[name] = {"video": "v", "frame": i * 100, "time_s": i * 10, "proposals": [],
+                       "boxes": [[10, 10, 30, 30]], "status": "done"}
+    (tmp_path / "labels.json").write_text(json.dumps(items))
+    data = export_yolo(tmp_path)
+    assert "0: chicken" in data.read_text() and "feeder" not in data.read_text()
+
+    st = LabelStore(tmp_path)
+    for k in list(st.items)[:6]:
+        st.update_objects(k, "done", [[50, 50, 90, 70, 1], [100, 20, 120, 60, 2]])
+    data = export_yolo(tmp_path)
+    assert "1: feeder" in data.read_text() and "2: water" in data.read_text()
+    labels = list((tmp_path / "yolo" / "labels").rglob("*.txt"))
+    assert len(labels) == 6                             # frames without the objects pass are left out
+    classes = sorted(int(l.split()[0]) for f in labels for l in f.read_text().splitlines())
+    assert classes.count(0) == 6 and classes.count(1) == 6 and classes.count(2) == 6

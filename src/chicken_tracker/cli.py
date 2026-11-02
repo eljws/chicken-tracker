@@ -1,4 +1,4 @@
-"""Command-line interface: ``chicken-tracker {process,analyze,snapshot,mine,review,train,identify,preview}``."""
+"""Command-line interface: ``chicken-tracker {process,analyze,snapshot,mine,review,train,identify,preview,stations}``."""
 
 from __future__ import annotations
 
@@ -78,7 +78,15 @@ def cmd_snapshot(a: argparse.Namespace) -> None:
 def cmd_mine(a: argparse.Namespace) -> None:
     from .labeling import mine
 
-    videos = _collect_videos(a.inputs)
+    if a.objects:
+        from .labeling import mine_objects
+
+        stats = mine_objects(a.dataset, model=a.model, conf=a.conf, imgsz=a.imgsz, device=a.device)
+        print(f"\n{stats}\nNext: chicken-tracker review {a.dataset} --objects")
+        return
+    videos = _collect_videos(a.inputs or [])
+    if not videos:
+        sys.exit("Give video files/folders to mine (or --objects to add feeder/water suggestions).")
     stats = mine(videos, a.dataset, model=a.model, prompts=a.prompt, every_s=a.every,
                  conf=a.conf, imgsz=a.imgsz, max_frames=a.max_frames, device=a.device)
     print(f"\n{stats}\nNext: chicken-tracker review {a.dataset}")
@@ -87,7 +95,7 @@ def cmd_mine(a: argparse.Namespace) -> None:
 def cmd_review(a: argparse.Namespace) -> None:
     from .review_server import serve
 
-    serve(a.dataset, port=a.port, open_browser=not a.no_browser)
+    serve(a.dataset, port=a.port, open_browser=not a.no_browser, objects=a.objects)
 
 
 def cmd_train(a: argparse.Namespace) -> None:
@@ -117,6 +125,22 @@ def cmd_preview(a: argparse.Namespace) -> None:
     if not a.no_open:
         import subprocess
         subprocess.run(["open", str(out)], check=False)
+
+
+def cmd_stations(a: argparse.Namespace) -> None:
+    from . import identity
+    from .stations import save_stations, stations_from_labels, write_station_analytics
+
+    stations = stations_from_labels(a.dataset)
+    if not stations:
+        sys.exit(f"No feeder/water boxes labelled in {a.dataset}. Run `chicken-tracker review --objects` first.")
+    print(f"Wrote {save_stations(a.run_dir, stations)}")
+    for s in stations:
+        print(f"  {s['id']:10s} box {s['box']}  (labelled in {s['labelled_in_frames']} frames)")
+    identity.export(a.run_dir)  # rewrites chickens.csv, then adds feeder/water columns
+    meta = json.loads((a.run_dir / "meta.json").read_text())
+    print(write_station_analytics(a.run_dir, meta["video"]["fps"], margin=a.margin,
+                                  min_visit_s=a.min_visit_s))
 
 
 def _print_summary(name: str, summary: dict, out_dir: Path) -> None:
@@ -156,8 +180,10 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(func=cmd_snapshot)
 
     p = sub.add_parser("mine", help="find candidate chicken frames for yes/no review")
-    p.add_argument("inputs", nargs="+", type=Path, help="video files or directories")
+    p.add_argument("inputs", nargs="*", type=Path, help="video files or directories")
     p.add_argument("-d", "--dataset", type=Path, default=Path("dataset"))
+    p.add_argument("--objects", action="store_true",
+                   help="add feeder/water suggestions to frames already in the dataset (no videos needed)")
     p.add_argument("--model", default="yoloe-11l-seg.pt",
                    help="proposal model: open-vocabulary (yoloe/world) or your trained best.pt")
     p.add_argument("--prompt", nargs="+", default=["chicken"], help="text prompt(s) for open-vocab models")
@@ -172,6 +198,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("dataset", type=Path, nargs="?", default=Path("dataset"))
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--no-browser", action="store_true")
+    p.add_argument("--objects", action="store_true", help="review feeder/water boxes instead of chickens")
     p.set_defaults(func=cmd_review)
 
     p = sub.add_parser("train", help="train a chicken detector on the reviewed frames")
@@ -193,6 +220,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--no-browser", action="store_true")
     p.add_argument("--device", help="cpu, mps, 0, ...")
     p.set_defaults(func=cmd_identify)
+
+    p = sub.add_parser("stations", help="feeder/water positions from labelled boxes + per-chicken visits")
+    p.add_argument("run_dir", type=Path)
+    p.add_argument("-d", "--dataset", type=Path, default=Path("dataset"))
+    p.add_argument("--margin", type=float, default=30.0, help="px around a station that still counts as at it")
+    p.add_argument("--min-visit-s", type=float, default=2.0)
+    p.set_defaults(func=cmd_stations)
 
     p = sub.add_parser("preview", help="render a short video with boxes, names, trails")
     p.add_argument("run_dir", type=Path)

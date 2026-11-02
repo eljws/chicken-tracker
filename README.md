@@ -57,7 +57,23 @@ Groups the tracker's pieces by appearance and opens a page with three tabs:
 
 Every change is saved immediately and can be undone (`↶ Undo` / ⌘Z, last 200 steps in `identity/history/`).
 
-### 4. Check it
+### 4. Feeders, water and distances
+
+```bash
+uv run chicken-tracker mine --objects                    # feeder/water suggestions on already-reviewed frames
+uv run chicken-tracker review --objects                  # browser: 2 = feeder, 3 = water; Y/N like before
+uv run chicken-tracker stations output/cam1              # station positions + per-chicken visits
+```
+
+The camera is static, so one frame with the feeder and water boxed is enough for the stations;
+the decisions you make are remembered by location, so further frames are mostly `Y` (needed only
+to train a detector that finds feeders/water on its own, e.g. for moving trays or new cameras).
+
+Distances in metres need `output/<video>/calibration.json` (image → ground homography).
+For camera 04 it was fitted to the 600 mm patio slabs (`calibration.refine_to_joints`) and
+cross-checked against a 2 L bottle (0.33 m); copy it to other runs from the same camera.
+
+### 5. Check it
 
 ```bash
 uv run chicken-tracker preview output/cam1 --start 17:30 --duration 3:00
@@ -76,7 +92,9 @@ uv run chicken-tracker analyze output/cam1 --zones zones.json --px-per-meter 120
 
 | File | Content |
 |---|---|
-| `chickens.csv` | **per named chicken:** visible / hidden seconds, distance, first/last seen |
+| `chickens.csv` | **per named chicken:** visible / hidden seconds, distance (px and m), pace, top speed, brisk (95th pct) speed, top acceleration, feeder / water visits and time |
+| `station_visits.csv` | every visit to a feeder / water station with start, end, duration |
+| `fast_moments.csv` | each chicken's 3 fastest moments (time, speed, piece) – check them in the preview |
 | `chicken_timeline.csv` | per chicken: visible and hidden segments; hidden ones carry a confidence that decays with gap length |
 | `detections_named.csv` | one row per chicken per frame (full box preferred over partial/duplicate ones) |
 | `flagged_pieces.csv` | pieces marked several chickens / not a chicken / partial / box too big – material for retraining |
@@ -84,7 +102,10 @@ uv run chicken-tracker analyze output/cam1 --zones zones.json --px-per-meter 120
 | `tracks.csv`, `zone_visits.csv`, `timeline.csv`, `summary.json`, `heatmap.png` | per-track and flock-level analytics |
 | `identity/` | naming state (`identity.json`), crops, appearance features, undo history |
 
-Distances/speeds are in pixels unless `--px-per-meter` is given.
+Per-chicken distances and speeds are in metres when `calibration.json` exists. Speed is the net
+movement over 0.5 s of median-smoothed feet positions; windows with impossible jumps (> 5 m/s
+frame-to-frame) or missing frames are dropped, and partial / too-big boxes are left out. A tracker
+swapping between two nearby birds can still look like a short dash, so eyeball `fast_moments.csv`.
 
 ## Notes
 

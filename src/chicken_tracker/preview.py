@@ -53,7 +53,13 @@ def render(run_dir: Path, start_s: float, duration_s: float, out: Path | None = 
     named = named_path.exists()
     det = pd.read_csv(named_path if named else run_dir / "detections.csv")
     det["label"] = det["chicken"] if named else "#" + det.track_id.astype(str)
-    out = Path(out or run_dir / ("preview_named.mp4" if named else "preview.mp4"))
+    if out is None:
+        # unique name per render: overwriting a video that's open in QuickTime breaks playback
+        import datetime
+        tag = f"{int(start_s // 60):02d}m{int(start_s % 60):02d}s_{int(duration_s // 60)}m{int(duration_s % 60):02d}s"
+        stamp = datetime.datetime.now().strftime("%H%M%S")
+        out = run_dir / f"preview{'_named' if named else ''}_{tag}_{stamp}.mp4"
+    out = Path(out)
 
     # hidden segments: where/when each named chicken was last seen before vanishing
     hidden = []
@@ -65,6 +71,13 @@ def render(run_dir: Path, start_s: float, duration_s: float, out: Path | None = 
             if len(last):
                 hidden.append((h.chicken, h.start_s, h.end_s, last.iloc[0]))
     names = sorted(det.label.unique()) if named else []
+    from .stations import at_station, load_stations
+    stations = load_stations(run_dir)
+    STATION_COLORS = {"feeder": (0, 152, 255), "water": (246, 182, 41)}  # BGR orange / blue
+    det["station"] = ""
+    for st in stations:
+        hit = at_station(det, st["box"], 30.0)
+        det.loc[hit & (det.station == ""), "station"] = st["type"]
 
     start = int(start_s * fps)
     end = start + int(duration_s * fps)
@@ -88,14 +101,22 @@ def render(run_dir: Path, start_s: float, duration_s: float, out: Path | None = 
             break
         img = cv2.resize(img, (W, H))
         t = f / fps
-        visible = set()
+        for st in stations:
+            x1, y1, x2, y2 = (int(v * s) for v in st["box"])
+            c = STATION_COLORS.get(st["type"], (255, 255, 255))
+            cv2.rectangle(img, (x1, y1), (x2, y2), c, 2)
+            _text(img, st["type"].upper(), (x1, y2 + 16), c, 0.5, 1)
+        visible, doing = set(), {}
         for _, r in (by_frame[f].iterrows() if f in by_frame else []):
             lab = str(r.label)
             c = _color(lab)
             visible.add(lab)
             trails.setdefault(lab, []).append((f, int(r.cx * s), int(r.y2 * s)))
             cv2.rectangle(img, (int(r.x1 * s), int(r.y1 * s)), (int(r.x2 * s), int(r.y2 * s)), c, 2)
-            _text(img, lab, (int(r.x1 * s), int(r.y1 * s) - 7), c)
+            act = {"feeder": "eating", "water": "drinking"}.get(r.station, "")
+            if act:
+                doing[lab] = act
+            _text(img, lab + (f" ({act})" if act else ""), (int(r.x1 * s), int(r.y1 * s) - 7), c)
         for lab, pts in trails.items():
             pts[:] = [p for p in pts if f - p[0] < trail_s * fps]
             if len(pts) > 1:
@@ -113,11 +134,11 @@ def render(run_dir: Path, start_s: float, duration_s: float, out: Path | None = 
         if names:
             # below the camera's own timestamp overlay, on a dark panel
             y0 = int(H * 0.11)
-            panel = img[y0:y0 + 26 * len(names) + 12, 6:250]
+            panel = img[y0:y0 + 26 * len(names) + 12, 6:300]
             panel[:] = (panel * 0.45).astype(np.uint8)
             y = y0 + 26
             for n in names:
-                st = "visible" if n in visible else status.get(n, "away")
+                st = (f"visible, {doing[n]}" if n in doing else "visible") if n in visible else status.get(n, "away")
                 _text(img, f"{n}: {st}", (14, y), _color(n) if st != "away" else (150, 150, 150), 0.6)
                 y += 26
         clock = int(t)
