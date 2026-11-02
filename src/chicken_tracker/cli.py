@@ -1,0 +1,212 @@
+"""Command-line interface: ``chicken-tracker {process,analyze,snapshot,mine,review,train,identify,preview}``."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import cv2
+
+from .pipeline import process_video, reanalyze
+from .tracking import TrackConfig, read_frame
+from .zones import load_zones
+
+VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
+
+
+def _add_analytics_args(p: argparse.ArgumentParser) -> None:
+    g = p.add_argument_group("analytics")
+    g.add_argument("--zones", type=Path, help="JSON file of named polygons, e.g. feeder/water/nest")
+    g.add_argument("--px-per-meter", type=float, help="calibration; report distances in metres")
+    g.add_argument("--min-track-s", type=float, default=1.0)
+    g.add_argument("--active-speed", type=float,
+                   help="speed above which a chicken is 'active' (default 15 px/s or 0.05 m/s)")
+    g.add_argument("--zone-anchor", choices=["bottom", "center"], default="bottom",
+                   help="point of the bbox used for zone tests (bottom = feet)")
+    g.add_argument("--zone-min-visit-s", type=float, default=1.0)
+    g.add_argument("--timeline-bin-s", type=float, default=10.0)
+
+
+def _analytics_kwargs(a: argparse.Namespace) -> dict:
+    return dict(
+        px_per_meter=a.px_per_meter, min_track_s=a.min_track_s, active_speed=a.active_speed,
+        zone_anchor=a.zone_anchor, zone_min_visit_s=a.zone_min_visit_s,
+        timeline_bin_s=a.timeline_bin_s,
+    )
+
+
+def _collect_videos(inputs: list[Path]) -> list[Path]:
+    videos: list[Path] = []
+    for p in inputs:
+        if p.is_dir():
+            videos += sorted(f for f in p.rglob("*") if f.suffix.lower() in VIDEO_EXTS)
+        elif p.exists():
+            videos.append(p)
+        else:
+            sys.exit(f"Not found: {p}")
+    return videos
+
+
+def cmd_process(a: argparse.Namespace) -> None:
+    cfg = TrackConfig(model=a.model, conf=a.conf, imgsz=a.imgsz, vid_stride=a.stride,
+                      device=a.device, classes=a.classes)
+    if a.tracker:
+        cfg.tracker = a.tracker
+    zones = load_zones(a.zones)
+    videos = _collect_videos(a.inputs)
+    if not videos:
+        sys.exit("No video files found")
+    for v in videos:
+        summary = process_video(v, a.out, cfg, zones, _analytics_kwargs(a), save_video=a.save_video)
+        _print_summary(v.stem, summary, a.out / v.stem)
+
+
+def cmd_analyze(a: argparse.Namespace) -> None:
+    summary = reanalyze(a.run_dir, load_zones(a.zones), _analytics_kwargs(a))
+    _print_summary(a.run_dir.name, summary, a.run_dir)
+
+
+def cmd_snapshot(a: argparse.Namespace) -> None:
+    frame = read_frame(a.video, a.frame)
+    cv2.imwrite(str(a.output), frame)
+    h, w = frame.shape[:2]
+    print(f"Wrote {a.output} ({w}x{h}). Use pixel coordinates from this image in zones.json.")
+
+
+def cmd_mine(a: argparse.Namespace) -> None:
+    from .labeling import mine
+
+    videos = _collect_videos(a.inputs)
+    stats = mine(videos, a.dataset, model=a.model, prompts=a.prompt, every_s=a.every,
+                 conf=a.conf, imgsz=a.imgsz, max_frames=a.max_frames, device=a.device)
+    print(f"\n{stats}\nNext: chicken-tracker review {a.dataset}")
+
+
+def cmd_review(a: argparse.Namespace) -> None:
+    from .review_server import serve
+
+    serve(a.dataset, port=a.port, open_browser=not a.no_browser)
+
+
+def cmd_train(a: argparse.Namespace) -> None:
+    from .labeling import train
+
+    train(a.dataset, model=a.model, epochs=a.epochs, imgsz=a.imgsz, batch=a.batch, device=a.device)
+
+
+def cmd_identify(a: argparse.Namespace) -> None:
+    from . import identity
+    from .identity_server import serve
+
+    if a.rebuild or not (a.run_dir / "identity" / "identity.json").exists():
+        identity.build(a.run_dir, flock_size=a.flock_size, device=a.device,
+                       video=str(a.video) if a.video else None)
+        identity.export(a.run_dir)
+    if not a.build_only:
+        serve(a.run_dir, port=a.port, open_browser=not a.no_browser)
+
+
+def cmd_preview(a: argparse.Namespace) -> None:
+    from .preview import parse_time, render
+
+    out = render(a.run_dir, parse_time(a.start), parse_time(a.duration), out=a.output,
+                 video=str(a.video) if a.video else None, width=a.width)
+    print(f"Wrote {out}")
+    if not a.no_open:
+        import subprocess
+        subprocess.run(["open", str(out)], check=False)
+
+
+def _print_summary(name: str, summary: dict, out_dir: Path) -> None:
+    brief = {k: v for k, v in summary.items() if k != "video"}
+    print(f"\n== {name} ==\n{json.dumps(brief, indent=2)}\nOutputs: {out_dir}/\n")
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(prog="chicken-tracker", description=__doc__)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("process", help="detect + track chickens in video file(s) and compute analytics")
+    p.add_argument("inputs", nargs="+", type=Path, help="video files or directories")
+    p.add_argument("-o", "--out", type=Path, default=Path("output"))
+    p.add_argument("--model", default="yolo11s.pt",
+                   help="YOLO weights; use your fine-tuned chicken model for best results")
+    p.add_argument("--classes", type=int, nargs="+",
+                   help="class ids to track (default: auto-detect chicken/bird classes)")
+    p.add_argument("--conf", type=float, default=0.25)
+    p.add_argument("--imgsz", type=int, default=960)
+    p.add_argument("--stride", type=int, default=1, help="process every Nth frame (faster)")
+    p.add_argument("--device", help="cpu, mps, 0, ...")
+    p.add_argument("--tracker", help="custom tracker YAML (default: bundled chicken_botsort.yaml)")
+    p.add_argument("--save-video", action="store_true", help="write annotated.mp4 with IDs")
+    _add_analytics_args(p)
+    p.set_defaults(func=cmd_process)
+
+    p = sub.add_parser("analyze", help="recompute analytics from a previous run (no re-detection)")
+    p.add_argument("run_dir", type=Path, help="e.g. output/<video-name>")
+    _add_analytics_args(p)
+    p.set_defaults(func=cmd_analyze)
+
+    p = sub.add_parser("snapshot", help="save a frame as PNG to help draw zones")
+    p.add_argument("video", type=Path)
+    p.add_argument("output", type=Path, nargs="?", default=Path("frame.png"))
+    p.add_argument("--frame", type=int, default=0)
+    p.set_defaults(func=cmd_snapshot)
+
+    p = sub.add_parser("mine", help="find candidate chicken frames for yes/no review")
+    p.add_argument("inputs", nargs="+", type=Path, help="video files or directories")
+    p.add_argument("-d", "--dataset", type=Path, default=Path("dataset"))
+    p.add_argument("--model", default="yoloe-11l-seg.pt",
+                   help="proposal model: open-vocabulary (yoloe/world) or your trained best.pt")
+    p.add_argument("--prompt", nargs="+", default=["chicken"], help="text prompt(s) for open-vocab models")
+    p.add_argument("--every", type=float, default=2.0, help="sample one frame every N seconds")
+    p.add_argument("--conf", type=float, default=0.03, help="low on purpose: you reject the junk")
+    p.add_argument("--imgsz", type=int, default=1280)
+    p.add_argument("--max-frames", type=int, default=300, help="frames to add per run")
+    p.add_argument("--device", help="cpu, mps, 0, ...")
+    p.set_defaults(func=cmd_mine)
+
+    p = sub.add_parser("review", help="open the yes/no review page in your browser")
+    p.add_argument("dataset", type=Path, nargs="?", default=Path("dataset"))
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--no-browser", action="store_true")
+    p.set_defaults(func=cmd_review)
+
+    p = sub.add_parser("train", help="train a chicken detector on the reviewed frames")
+    p.add_argument("dataset", type=Path, nargs="?", default=Path("dataset"))
+    p.add_argument("--model", default="yolo11s.pt", help="starting weights")
+    p.add_argument("--epochs", type=int, default=100)
+    p.add_argument("--imgsz", type=int, default=1280)
+    p.add_argument("--batch", type=int, default=8)
+    p.add_argument("--device", help="cpu, mps, 0, ...")
+    p.set_defaults(func=cmd_train)
+
+    p = sub.add_parser("identify", help="group track pieces into named chickens (opens naming page)")
+    p.add_argument("run_dir", type=Path, help="e.g. output/<video-name>")
+    p.add_argument("--video", type=Path, help="source video, if it moved since `process`")
+    p.add_argument("--flock-size", type=int, help="stop grouping at this many chickens")
+    p.add_argument("--rebuild", action="store_true", help="redo grouping (discards your answers)")
+    p.add_argument("--build-only", action="store_true")
+    p.add_argument("--port", type=int, default=8766)
+    p.add_argument("--no-browser", action="store_true")
+    p.add_argument("--device", help="cpu, mps, 0, ...")
+    p.set_defaults(func=cmd_identify)
+
+    p = sub.add_parser("preview", help="render a short video with boxes, names, trails")
+    p.add_argument("run_dir", type=Path)
+    p.add_argument("--start", default="0", help="seconds or mm:ss into the video")
+    p.add_argument("--duration", default="3:00", help="seconds or mm:ss")
+    p.add_argument("-o", "--output", type=Path)
+    p.add_argument("--video", type=Path, help="source video, if it moved since `process`")
+    p.add_argument("--width", type=int, default=1280)
+    p.add_argument("--no-open", action="store_true")
+    p.set_defaults(func=cmd_preview)
+
+    a = parser.parse_args(argv)
+    a.func(a)
+
+
+if __name__ == "__main__":
+    main()

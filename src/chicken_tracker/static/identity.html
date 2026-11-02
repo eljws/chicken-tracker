@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Who's who — chickens</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #141414; color: #eee; font: 14px/1.4 system-ui, sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; display: flex; gap: 10px; align-items: center;
+           padding: 10px 16px; background: #1f1f1f; border-bottom: 1px solid #333; }
+  .tab { background: none; border: 0; color: #aaa; font-size: 15px; padding: 6px 10px; cursor: pointer;
+         border-bottom: 2px solid transparent; }
+  .tab.on { color: #fff; border-color: #4caf50; }
+  button.act { background: #2d2d2d; color: #eee; border: 1px solid #555; border-radius: 6px; padding: 6px 12px;
+               cursor: pointer; font-size: 14px; }
+  button.act:hover { background: #3a3a3a; }
+  button.yes { background: #2e7d32; border-color: #4caf50; }
+  button.no { background: #8e2b2b; border-color: #e57373; }
+  .right { margin-left: auto; color: #999; }
+  main { padding: 16px; }
+  .card { background: #1d1d1d; border: 1px solid #333; border-radius: 10px; padding: 12px; margin-bottom: 14px; }
+  .card h3 { margin: 0 0 8px; display: flex; gap: 10px; align-items: center; font-weight: 500; }
+  .card input { background: #111; color: #fff; border: 1px solid #555; border-radius: 6px; padding: 6px 10px;
+                font-size: 16px; width: 200px; }
+  .card input.unnamed { border-color: #ffc107; }
+  .meta { color: #999; font-size: 13px; }
+  select { background: #111; color: #eee; border: 1px solid #555; border-radius: 6px; padding: 5px; }
+  .strip { display: flex; flex-wrap: wrap; gap: 6px; }
+  .strip img { width: 84px; height: 84px; object-fit: contain; background: #000; border-radius: 6px; border: 2px solid transparent;
+               cursor: pointer; }
+  .strip img.sure { border-color: #4caf50; }
+  .strip img.partial { border-style: dashed; border-color: #ffb74d; }
+  .strip img.loose { border-style: dotted; border-color: #64b5f6; }
+  .strip img.sel { border-color: #ffc107; outline: 2px solid #ffc107; }
+  #panel { position: fixed; right: 16px; bottom: 16px; width: 560px; max-height: 80vh; overflow: auto; background: #262626; border: 1px solid #555;
+           border-radius: 10px; padding: 12px; display: none; z-index: 10; }
+  #panel > img { width: 160px; border-radius: 6px; }
+  #panel .opts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .q { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  .q h2 { margin: 0 0 6px; font-size: 26px; }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .grid img { width: 100%; aspect-ratio: 1; object-fit: contain; background: #000; border-radius: 6px; }
+  .answers { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; align-items: center; }
+  kbd { background: #333; border: 1px solid #555; border-radius: 4px; padding: 0 5px; font-size: 12px; }
+  .hint { color: #aaa; margin-bottom: 14px; }
+  .film { display: flex; flex-wrap: wrap; align-items: center; row-gap: 6px; margin: 6px 0; }
+  .film img { border-radius: 4px; background: #000; }
+  .cut { align-self: stretch; width: 20px; display: flex; align-items: center; justify-content: center; cursor: pointer;
+         color: #666; font-size: 13px; border-radius: 4px; }
+  .cut:hover { color: #111; background: #ffc107; }
+  .gap { width: 4px; }
+  #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #333; padding: 8px 16px;
+           border-radius: 6px; opacity: 0; transition: opacity .3s; }
+</style>
+</head>
+<body>
+<header>
+  <button class="tab on" data-tab="name">1 · Name &amp; merge</button>
+  <button class="tab" data-tab="ask">2 · Questions <span id="qcount"></span></button>
+  <button class="tab" data-tab="conflicts">3 · Conflicts <span id="ccount"></span></button>
+  <button class="act" id="undo" disabled>↶ Undo</button>
+  <button class="act" id="resort" title="Re-sort unconfirmed pieces against your named chickens">↻ Re-sort pieces</button>
+  <span class="right" id="status"></span>
+</header>
+<main id="main"></main>
+<div id="panel"></div>
+<div id="toast"></div>
+<script>
+let S = null, tab = "name", sel = null;
+const $ = s => document.querySelector(s);
+const label = c => c.name || `Chicken ${c.id + 1}`;
+const img = n => `/crop/${encodeURIComponent(n)}`;
+
+async function api(path, body) {
+  const r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" },
+                                       body: JSON.stringify(body) } : {});
+  const j = await r.json();
+  if (j.error) { toast(j.error); return; }
+  S = j; render();
+}
+const clockOf = s => { const t = Math.round(s); return `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`; };
+// filmstrip of a piece across its whole life; ✂ between frames cuts the piece there
+function film(p, h = 120, cuttable = true) {
+  return `<div class="film">${p.strip.map((f, i) =>
+    (i ? (cuttable ? `<span class="cut" data-t="${p.track}" data-f="${f}" title="cut piece here">✂</span>` : '<span class="gap"></span>') : "") +
+    `<img src="/strip/${p.track}/${f}.jpg?v=${S.version}" style="height:${h}px">`).join("")}</div>`;
+}
+function bindCuts(root = document) {
+  root.querySelectorAll(".cut").forEach(c => c.onclick = async () => {
+    const t = +c.dataset.t, f = +c.dataset.f;
+    if (!confirm(`Cut piece #${t} at ${clockOf(f / S.fps)}?\n\nEverything from this frame on becomes a new piece, ` +
+                 `so you can label the two halves separately.`)) return;
+    toast("Cutting… (extracting new pictures)");
+    sel = null;
+    await api("/api/split", { track: t, frame: f });
+    toast("Cut ✂ — label each half");
+  });
+}
+function toast(m) { const t = $("#toast"); t.textContent = m; t.style.opacity = 1; clearTimeout(t._t);
+                    t._t = setTimeout(() => t.style.opacity = 0, 1400); }
+
+function render() {
+  $("#qcount").textContent = `(${S.questions})`;
+  const u = $("#undo");
+  u.disabled = !S.undo.count;
+  u.title = S.undo.count ? `Undo: ${S.undo.label}  (⌘Z · ${S.undo.count} steps saved)` : "Nothing to undo";
+  $("#ccount").innerHTML = S.conflicts ? `<b style="color:#ff7961">(${S.conflicts})</b>` : "(0)";
+  const unnamed = S.chickens.filter(c => !c.name).length;
+  $("#status").textContent = `${S.chickens.length} chickens · ${unnamed} unnamed · ${S.answered} answers`;
+  document.querySelectorAll(".tab").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
+  tab === "name" ? renderName() : tab === "ask" ? renderAsk() : renderConflicts();
+}
+
+function renderName() {
+  const opts = S.chickens.map(c => `<option value="${c.id}">${esc(label(c))}</option>`).join("");
+  $("#main").innerHTML = `<div class="hint">Give each group its chicken's name. If two groups are the same bird,
+    merge them. Click a picture that's in the wrong group to move it. Green border = confirmed by you,
+    dashed orange = only part of the bird, dotted blue = box a bit too big.</div>` +
+    S.chickens.map(c => `
+    <div class="card"><h3>
+      <input data-id="${c.id}" class="${c.name ? "" : "unnamed"}" value="${esc(c.name)}" placeholder="Chicken ${c.id + 1} — type name">
+      <span class="meta">${c.fragments.length} pieces · ${c.minutes} min seen</span>
+      <span style="margin-left:auto" class="meta">same bird as</span>
+      <select data-merge="${c.id}"><option value="">—</option>${opts.replace(`value="${c.id}"`, `value="${c.id}" disabled`)}</select>
+    </h3>
+    <div class="strip">${c.fragments.map(f => `<img src="${img(f.crop)}" data-t="${f.track}" data-c="${c.id}"
+       class="${f.sure ? "sure" : ""} ${f.flag || ""} ${sel && sel.track === f.track ? "sel" : ""}"
+       title="piece #${f.track}${f.flag === "partial" ? " (only part of the bird)" : f.flag === "loose" ? " (box a bit too big)" : ""}">`).join("")}</div>
+    </div>`).join("") + [["multiple", "Set aside: several chickens in one box"],
+                           ["not_chicken", "Set aside: not a chicken"]].map(([k, title]) => `
+    <div class="card" style="opacity:.85"><h3><span>${title}</span>
+      <span class="meta">${S.aside[k].length} pieces · not counted for any chicken · click to put one back</span></h3>
+    <div class="strip">${S.aside[k].map(f => `<img src="${img(f.crop)}" data-t="${f.track}" data-aside="${k}"
+       class="${sel && sel.track === f.track ? "sel" : ""}" title="piece #${f.track}">`).join("") ||
+       '<span class="meta">none yet</span>'}</div></div>`).join("");
+  document.querySelectorAll(".card input").forEach(i => {
+    i.addEventListener("change", () => api("/api/name", { chicken: +i.dataset.id, name: i.value }));
+    i.addEventListener("keydown", e => { if (e.key === "Enter") i.blur(); });
+  });
+  document.querySelectorAll("select[data-merge]").forEach(s => s.addEventListener("change", () => {
+    if (!s.value) return;
+    const src = S.chickens.find(c => c.id === +s.dataset.merge), dst = S.chickens.find(c => c.id === +s.value);
+    if (confirm(`Merge "${label(src)}" into "${label(dst)}"?`)) api("/api/merge", { src: src.id, dst: dst.id });
+    else s.value = "";
+  }));
+  document.querySelectorAll(".strip img").forEach(im => im.addEventListener("click", () => {
+    sel = { track: +im.dataset.t, chicken: im.dataset.c !== undefined ? +im.dataset.c : null,
+            aside: im.dataset.aside || null, crop: im.getAttribute("src") };
+    render(); showPanel();
+  }));
+  if (!sel) $("#panel").style.display = "none";
+}
+
+function showPanel() {
+  const p = $("#panel"), cur = S.chickens.find(c => c.id === sel.chicken);
+  const where = cur ? esc(label(cur)) : sel.aside === "multiple" ? "several chickens" : "not a chicken";
+  p.style.display = "block";
+  p.innerHTML = `<img src="${sel.crop}"><div class="meta">piece #${sel.track}, now in <b>${where}</b></div>
+    <div class="opts">
+      ${cur ? `<button class="act yes" data-v="yes" data-c="${cur.id}">✓ correct</button>
+               <button class="act" data-v="partial" data-c="${cur.id}">◐ only part of ${esc(label(cur))}</button>
+               <button class="act" data-v="loose" data-c="${cur.id}">◑ mostly ${esc(label(cur))}, box too big</button>` : ""}
+      ${S.chickens.filter(c => !cur || c.id !== cur.id).map(c =>
+        `<button class="act" data-v="moved" data-c="${c.id}">→ ${esc(label(c))}</button>`).join("")}
+      <button class="act" data-v="new">+ new chicken</button>
+      ${sel.aside !== "multiple" ? '<button class="act no" data-v="multiple">several chickens</button>' : ""}
+      ${sel.aside !== "not_chicken" ? '<button class="act no" data-v="not_chicken">not a chicken</button>' : ""}
+      <button class="act" data-v="close">close</button></div>
+    <div id="pfilm"><div class="meta">loading filmstrip…</div></div>`;
+  fetch(`/api/piece/${sel.track}`).then(r => r.json()).then(pc => {
+    const box = p.querySelector("#pfilm");
+    if (box && pc.strip) { box.innerHTML = `<div class="meta">whole piece (${pc.duration_s}s), ✂ to cut:</div>` + film(pc, 70); bindCuts(box); }
+  });
+  p.querySelectorAll("button").forEach(b => b.addEventListener("click", async () => {
+    if (b.dataset.v === "close") { sel = null; return render(); }
+    const t = sel.track; sel = null;
+    await api("/api/answer", { track: t, chicken: b.dataset.c ? +b.dataset.c : null, verdict: b.dataset.v });
+  }));
+}
+
+function renderAsk() {
+  $("#panel").style.display = "none";
+  const q = S.next;
+  if (!q) { $("#main").innerHTML = `<div class="card"><h3>No more questions 🎉</h3>
+    <div class="meta">Results are saved in chickens.csv and chicken_timeline.csv.
+    Try "Re-sort pieces" after naming or merging — it may raise new questions.</div></div>`; return; }
+  const others = S.chickens.filter(c => c.id !== q.chicken);
+  const t = Math.round(q.start), clock = `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
+  $("#main").innerHTML = `
+    <div class="q">
+      <div><h2>Is this ${esc(q.name)}?</h2>
+        <div class="meta">piece #${q.track} · ${q.duration_s}s seen from ${clock} into the video</div>
+        <div class="answers">
+          <button class="act yes" id="y">Yes <kbd>Y</kbd></button>
+          <button class="act" id="p">Only part of ${esc(q.name)} <kbd>P</kbd></button>
+          <button class="act" id="l">Mostly ${esc(q.name)}, box too big <kbd>L</kbd></button>
+          <button class="act no" id="n">No <kbd>N</kbd></button>
+          <button class="act no" id="m">Several chickens <kbd>M</kbd></button>
+          <button class="act no" id="x">Not a chicken <kbd>X</kbd></button>
+          <button class="act" id="c">New chicken <kbd>C</kbd></button>
+        </div>
+        <div class="meta" style="margin-bottom:6px">…or it's actually:</div>
+        <div class="answers" style="margin-top:0">${others.map((c, i) =>
+          `<button class="act" data-c="${c.id}">${i < 9 ? `<kbd>${i + 1}</kbd> ` : ""}${esc(label(c))}</button>`).join("")}</div>
+        <div class="meta">The whole piece, start → end (✂ to cut if it changes bird):</div>${film(q, 100)}</div>
+      <div><h2 style="color:#aaa">${esc(q.name)} looks like:</h2><div class="meta">&nbsp;</div>
+        <div class="grid" style="margin-top:62px">${q.ref_crops.map(c => `<img src="${img(c)}">`).join("")}</div></div>
+    </div>`;
+  const ans = (verdict, chicken) => api("/api/answer", { track: q.track, chicken, verdict });
+  $("#y").onclick = () => ans("yes", q.chicken);
+  $("#p").onclick = () => ans("partial", q.chicken);
+  $("#l").onclick = () => ans("loose", q.chicken);
+  $("#n").onclick = () => ans("no", q.chicken);
+  $("#m").onclick = () => ans("multiple", null);
+  $("#x").onclick = () => ans("not_chicken", null);
+  $("#c").onclick = () => ans("new", null);
+  document.querySelectorAll("button[data-c]").forEach(b => b.onclick = () => ans("moved", +b.dataset.c));
+  window._keys = { y: () => ans("yes", q.chicken), n: () => ans("no", q.chicken), x: () => ans("not_chicken", null),
+                   m: () => ans("multiple", null), p: () => ans("partial", q.chicken),
+                   l: () => ans("loose", q.chicken),
+                   c: () => ans("new", null) };
+  others.slice(0, 9).forEach((c, i) => window._keys[String(i + 1)] = () => ans("moved", c.id));
+  bindCuts();
+}
+
+function renderConflicts() {
+  $("#panel").style.display = "none"; window._keys = null;
+  const q = S.conflict;
+  if (!q) { $("#main").innerHTML = `<div class="card"><h3>No conflicts 🎉</h3>
+    <div class="meta">No chicken is in two places at once.</div></div>`; return; }
+  const clock = s => { const t = Math.round(s); return `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`; };
+  const others = S.chickens.filter(c => c.id !== q.chicken);
+  $("#main").innerHTML = `
+    <div class="hint">Both pieces are called <b>${esc(q.name)}</b>, but they're on screen at the same time for
+      ${q.overlap_s}s — one bird can't be in two places. Say what each piece really is; fixing either one resolves it.
+      (${S.conflicts} conflicts left, biggest first)<br>
+      If only <b>part</b> of a long piece is the problem, use <b>✂ cut out just the overlap</b> and label that bit.
+      To cut elsewhere, click a <b>✂</b> in the filmstrip — it cuts <i>at the frame to its right</i>. If one box shows <b>only part</b> of the bird (head, half behind something) while the
+      other shows all of it, mark it <b>◐ only part of</b>; if a box is mostly that bird but also catches a bit of a
+      neighbour, mark it <b>◑ box too big</b>. Either way it's one bird boxed twice, not a conflict.</div>
+    <div class="card"><h3>Same moment, same camera frame <span class="meta">— start, middle and end of the overlap</span></h3>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">${[0, 1, 2].map(k =>
+        `<img src="/snap/${q.a}/${q.b}/${k}.jpg" style="width:100%;border-radius:6px;background:#000;min-height:120px">`).join("")}</div>
+    </div>
+    <div>${q.pieces.map((p, i) => `
+      <div class="card" style="border-color:${i ? "#ffdc00" : "#00dcff"}"><h3>
+        <span style="color:${i ? "#ffdc00" : "#00dcff"};font-weight:700;font-size:20px">${i ? "B" : "A"}</span> piece #${p.track} <span class="meta">${p.duration_s}s from ${clock(p.start)}
+        ${p.sure ? " · ✓ confirmed" : ""}</span></h3>
+        ${film(p)}
+        ${p.can_isolate ? `<button class="act" data-iso="${p.track}" data-other="${p.other}" style="border-color:#ffc107">
+          ✂ cut out just the overlap (${clockOf(q.overlap_from)}–${clockOf(q.overlap_to)}) — then label that bit</button>` : ""}
+        <div class="answers">
+          <button class="act yes" data-t="${p.track}" data-v="yes" data-c="${q.chicken}">✓ this is ${esc(q.name)}</button>
+          <button class="act" data-t="${p.track}" data-v="partial" data-c="${q.chicken}">◐ only part of ${esc(q.name)}</button>
+          <button class="act" data-t="${p.track}" data-v="loose" data-c="${q.chicken}">◑ mostly ${esc(q.name)}, box too big</button>
+          ${others.map(c => `<button class="act" data-t="${p.track}" data-v="moved" data-c="${c.id}">→ ${esc(label(c))}</button>`).join("")}
+          <button class="act" data-t="${p.track}" data-v="new">+ new chicken</button>
+          <button class="act no" data-t="${p.track}" data-v="multiple">several chickens</button>
+          <button class="act no" data-t="${p.track}" data-v="not_chicken">not a chicken</button>
+        </div></div>`).join("")}</div>`;
+  document.querySelectorAll("#main button[data-t]").forEach(b => b.onclick = () =>
+    api("/api/answer", { track: +b.dataset.t, chicken: b.dataset.c ? +b.dataset.c : null, verdict: b.dataset.v }));
+  document.querySelectorAll("#main button[data-iso]").forEach(b => b.onclick = async () => {
+    toast("Cutting out the overlap…");
+    await api("/api/isolate", { track: +b.dataset.iso, other: +b.dataset.other });
+    toast("Done ✂ — now label the overlapping bit");
+  });
+  bindCuts();
+}
+
+window.addEventListener("keydown", e => {
+  if (tab !== "ask" || e.target.tagName === "INPUT" || !window._keys) return;
+  const f = window._keys[e.key.toLowerCase()]; if (f) { e.preventDefault(); window._keys = null; f(); }
+});
+document.querySelectorAll(".tab").forEach(b => b.onclick = () => { tab = b.dataset.tab; sel = null; render(); });
+async function undo() {
+  if (!S.undo.count) return toast("Nothing to undo");
+  sel = null;
+  await api("/api/undo", {});
+  if (S.undone) toast(`Undone: ${S.undone}`);
+}
+$("#undo").onclick = undo;
+window.addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z" && e.target.tagName !== "INPUT") { e.preventDefault(); undo(); }
+});
+$("#resort").onclick = async () => { $("#resort").disabled = true; await api("/api/resort", {}); $("#resort").disabled = false;
+                                     toast("Re-sorted"); };
+const esc = s => String(s).replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch]);
+api("/api/state");
+</script>
+</body>
+</html>

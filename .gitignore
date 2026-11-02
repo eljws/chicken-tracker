@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+output/
+*.pt
+*.mp4
+*.avi
+*.mkv
+dataset/
+weights/
+mobileclip*.ts
+.DS_Store

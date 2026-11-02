@@ -1,0 +1,13 @@
+# BoT-SORT tuned for a static CCTV camera watching chickens.
+tracker_type: botsort
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.35   # a bit stricter than default: fewer spurious new IDs
+track_buffer: 90         # keep lost tracks ~3s @30fps: chickens occlude each other a lot
+match_thresh: 0.8
+fuse_score: True
+gmc_method: none         # camera is fixed; skip global motion compensation (faster)
+proximity_thresh: 0.5
+appearance_thresh: 0.8
+with_reid: False         # set True to use appearance features (slower, fewer ID swaps)
+model: auto
