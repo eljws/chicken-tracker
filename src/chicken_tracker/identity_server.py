@@ -14,6 +14,7 @@ from urllib.parse import unquote
 
 from . import checks as K
 from . import identity as I
+from . import recognizer as R
 
 STRIP_LEN = 12
 
@@ -42,7 +43,15 @@ def make_handler(run_dir: Path):
         picks = I.pd.read_csv(store.root / "crops.csv")
         feats = I.np.load(store.root / "features.npy")
         return K.run_checks(store.data, st["det"], I.pd.read_csv(named_p), picks, feats, st["frags"],
-                            store.data["fps"])
+                            store.data["fps"], recog=recog())
+
+    def recog():
+        """Recogniser predictions joined to the current pieces; re-joined after cuts."""
+        p = store.root / R.PRED_FILE
+        key = (st["version"], p.stat().st_mtime if p.exists() else 0)
+        if st.get("recog_key") != key:
+            st["recog_key"], st["recog"] = key, R.load_predictions(run_dir, st["det"])
+        return st["recog"]
 
     def _check_view(c: dict) -> dict:
         frames = I.np.sort(st["det"].loc[st["det"].track_id == c["track"], "frame"].to_numpy())

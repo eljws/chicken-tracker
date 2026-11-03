@@ -117,8 +117,13 @@ def cmd_identify(a: argparse.Namespace) -> None:
 
 
 def cmd_recognizer(a: argparse.Namespace) -> None:
-    from .recognizer import build_id_dataset, evaluate, train_recognizer
+    from .recognizer import build_id_dataset, cross_fit, evaluate, train_recognizer
 
+    if a.audit:
+        r = cross_fit(a.run_dir, a.out, folds=a.folds, device=a.device, video=str(a.video) if a.video else None)
+        print(f"{r['crops']} crops judged by models that never saw their piece; fold accuracy "
+              + ", ".join(f"{v:.1%}" for v in r["fold_accuracy"].values()) + "\nSee the Checks tab.")
+        return
     if not a.skip_build:
         info = build_id_dataset(a.run_dir, a.out, video=str(a.video) if a.video else None)
         print(f"{info['crops']} crops\n{info['counts']}")
@@ -260,6 +265,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--video", type=Path, help="source video, if it moved since `process`")
     p.add_argument("--epochs", type=int, default=40)
     p.add_argument("--skip-build", action="store_true", help="reuse the existing crop set")
+    p.add_argument("--audit", action="store_true",
+                   help="train K models each without some pieces; feeds the Checks tab (~12 min)")
+    p.add_argument("--folds", type=int, default=4)
     p.add_argument("--device", help="cpu, mps, 0, ...")
     p.set_defaults(func=cmd_recognizer)
 

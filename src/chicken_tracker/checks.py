@@ -10,6 +10,13 @@ pieces. These checks look for the other ways things go wrong, each with a sugges
                     cut that stretch out and set it aside as "several chickens".
 * ``swap``          a named piece whose look changes part-way (tracker jumped to another
                     bird) -> cut where it changes; both halves are then re-checked.
+* ``recognizer``    the recogniser trained on your hens (judging each piece with a model
+                    that never saw it) is sure a named piece is another hen, or several
+                    chickens -> move it.
+
+With recogniser predictions (``recognizer.cross_fit``), swaps are found from its per-crop
+verdicts once a second instead of 8 generic-embedding crops, and set-aside single birds are
+named by it.
 
 Box size is judged against the typical single-chicken box *at that height in the image*
 (birds near the camera look bigger), learned from the named detections.
@@ -23,6 +30,11 @@ import pandas as pd
 SINGLE_MAX = 1.35   # box up to 1.35x a typical single bird = one bird
 MERGED_MIN = 1.7    # box over 1.7x = two birds in one box
 SMOOTH = 15         # frames (~1 s) of rolling median on the size ratio
+CROWDED = 0.3       # crops more than 30% covered by another box: not used to judge a hen
+REC_SURE = 0.6      # recogniser: other hen at least this likely ...
+REC_OWNER_MAX = 0.25  # ... and the current name at most this likely
+STRETCH_MIN_CROPS = 5  # recogniser: a stretch of >= 5 crops (~5 s) ...
+STRETCH_SHARE = 0.7    # ... at least 70% of which aren't the named hen
 
 
 def size_model(named: pd.DataFrame) -> np.ndarray:
@@ -63,9 +75,31 @@ def _best_chicken(feats: np.ndarray | None, centroids: dict[int, np.ndarray], na
     return cid, round(sims[cid], 2)
 
 
+def _rec_stretches(wrong: np.ndarray) -> list[tuple[int, int]]:
+    """(first, last) crop index of stretches where the recogniser mostly doesn't see the named hen.
+
+    Wrong crops separated by at most one right crop are joined; a stretch needs
+    STRETCH_MIN_CROPS crops and at least STRETCH_SHARE of them wrong.
+    """
+    out, i, n = [], 0, len(wrong)
+    while i < n:
+        if not wrong[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and (wrong[j + 1] or (j + 2 < n and wrong[j + 2])):
+            j += 1 if wrong[j + 1] else 2
+        if j - i + 1 >= STRETCH_MIN_CROPS and wrong[i:j + 1].mean() >= STRETCH_SHARE:
+            out.append((i, j))
+        i = j + 1
+    return out
+
+
 def run_checks(data: dict, det: pd.DataFrame, named: pd.DataFrame, picks: pd.DataFrame,
-               feats: np.ndarray, frags: dict, fps: float) -> list[dict]:
+               feats: np.ndarray, frags: dict, fps: float, recog=None) -> list[dict]:
+    """`recog`: optional (predictions, classes) from ``recognizer.load_predictions``."""
     from .identity import _centroid, confirmed  # local: avoid import cycle
+    from .recognizer import SEVERAL
 
     dismissed = set(data.get("dismissed_checks", []))
     names = {c["id"]: c["name"] or f"Chicken {c['id'] + 1}" for c in data["chickens"]}
@@ -88,6 +122,26 @@ def run_checks(data: dict, det: pd.DataFrame, named: pd.DataFrame, picks: pd.Dat
         sel = (fr >= f0) & (fr <= f1)
         return ft[sel] if sel.any() else None
 
+    cid_of = {v: k for k, v in names.items()}
+    rec = {}
+    if recog is not None:
+        pred, classes = recog
+        cols = [f"p_{c}" for c in classes]
+        for t, g in pred.sort_values("frame").groupby("track_id"):
+            rec[int(t)] = (g.frame.to_numpy(), g[cols].to_numpy(), g.crowd.to_numpy())
+        classes = np.array(classes)
+
+    def rec_verdict(t, f0=None, f1=None, clear_only=True):
+        """(mean probs, n crops) of piece t, optionally within [f0, f1]."""
+        if t not in rec:
+            return None, 0
+        fr, P, crowd = rec[t]
+        sel = np.ones(len(fr), bool) if f0 is None else (fr >= f0) & (fr <= f1)
+        if clear_only:
+            sel &= crowd <= CROWDED
+        return (P[sel].mean(0), int(sel.sum())) if sel.any() else (None, 0)
+
+    flagged = set(data.get("partial", [])) | set(data.get("loose", []))
     clock = lambda f: f"{int(f / fps // 60)}:{int(f / fps % 60):02d}"
     out = []
     aside = {t: "several chickens" for t in data.get("multiple", [])} | \
@@ -104,6 +158,11 @@ def run_checks(data: dict, det: pd.DataFrame, named: pd.DataFrame, picks: pd.Dat
         if t in aside:   # 1. set aside, but single-bird sized for a long stretch
             for f0, f1 in _runs(ratio <= SINGLE_MAX, frames, fps, min_s=5.0):
                 cid, sim = _best_chicken(seg_feats(t, f0, f1), centroids, names)
+                p, n = rec_verdict(t, f0, f1, clear_only=False)
+                if p is not None and n >= 2:  # recogniser knows your hens better than the embedding
+                    hens = [i for i, c in enumerate(classes) if c != SEVERAL and c in cid_of]
+                    i = max(hens, key=lambda i: p[i]) if hens else None
+                    cid, sim = (cid_of[classes[i]], 1.0) if i is not None and p[i] >= 0.7 else (None, None)
                 key = f"aside_single:{t}:{f0}:{f1}"
                 if key in dismissed:
                     continue
@@ -114,6 +173,20 @@ def run_checks(data: dict, det: pd.DataFrame, named: pd.DataFrame, picks: pd.Dat
                                      f"its box is the size of one bird{looks}.",
                             "fix": f"Cut {clock(f0)}–{clock(f1)} out" +
                                    (f" and give it to {names[cid]}" if looks else " so it can be named")})
+            p, n = rec_verdict(t)
+            if t in data.get("multiple", []) and p is not None and n >= 3 and \
+                    not any(c["track"] == t for c in out):
+                i = int(p.argmax())
+                hen = str(classes[i])
+                key = f"recognizer:{t}:{hen}"
+                if hen != SEVERAL and hen in cid_of and p[i] >= 0.9 and key not in dismissed:
+                    out.append({"key": key, "kind": "recognizer", "track": t,
+                                "from_frame": int(frames[0]), "to_frame": int(frames[-1]),
+                                "seconds": round((frames[-1] - frames[0] + 1) / fps, 1),
+                                "chicken": cid_of[hen], "several": False,
+                                "title": f"Piece #{t} is set aside as \"several chickens\", but the recogniser "
+                                         f"sees just {hen} ({p[i]:.0%} sure, from {n} crops).",
+                                "fix": f"Give it to {hen}"})
         elif t in owner:  # 2. merged box inside a named piece
             for f0, f1 in _runs(ratio >= MERGED_MIN, frames, fps, min_s=3.0):
                 key = f"merged_inside:{t}:{f0}:{f1}"
@@ -125,6 +198,59 @@ def run_checks(data: dict, det: pd.DataFrame, named: pd.DataFrame, picks: pd.Dat
                                      f"{np.median(ratio[(frames >= f0) & (frames <= f1)]):.1f}× one bird — "
                                      f"probably two chickens in one box.",
                             "fix": f"Cut {clock(f0)}–{clock(f1)} out as \"several chickens\""})
+            if t in flagged:
+                continue  # only part of a bird / loose box: appearance checks would be noise
+            if t in rec:
+                own = names[owner[t]]
+                fr, P, crowd = rec[t]
+                clear = crowd <= CROWDED
+                fr, P = fr[clear], P[clear]
+                labels = classes[P.argmax(1)] if len(P) else np.array([])
+                p, n = rec_verdict(t)
+                po = float(p[list(classes).index(own)]) if p is not None and own in classes else 0.0
+                i = int(p.argmax()) if p is not None else 0
+                other = str(classes[i]) if p is not None else own
+                if p is not None and n >= 3 and other != own and p[i] >= REC_SURE and po <= REC_OWNER_MAX and \
+                        (other == SEVERAL or other in cid_of):
+                    # 4. recogniser sure the whole piece is someone else
+                    key = f"recognizer:{t}:{other}"
+                    if key not in dismissed:
+                        several = other == SEVERAL
+                        out.append({"key": key, "kind": "recognizer", "track": t,
+                                    "from_frame": int(frames[0]), "to_frame": int(frames[-1]),
+                                    "seconds": round((frames[-1] - frames[0] + 1) / fps, 1),
+                                    "chicken": None if several else cid_of[other], "several": several,
+                                    "title": f"{own}'s piece #{t} looks like "
+                                             f"{'several chickens' if several else other} to the recogniser "
+                                             f"({p[i]:.0%} sure; {own} {po:.0%}, from {n} crops).",
+                                    "fix": "Set it aside as several chickens" if several else f"Move it to {other}"})
+                    continue
+                # 3a. part of the piece isn't the named hen (tracker swap at an end, or another
+                # bird for a while in the middle)
+                for i0, i1 in _rec_stretches(labels != own):
+                    if i1 - i0 + 1 >= 0.9 * len(labels):
+                        continue  # (nearly) whole piece, but not sure enough for check 4
+                    f0 = int(frames[0]) if i0 == 0 else int((fr[i0 - 1] + fr[i0]) // 2)
+                    f1 = int(frames[-1]) if i1 == len(fr) - 1 else int((fr[i1] + fr[i1 + 1]) // 2)
+                    seen, cnt = np.unique(labels[i0:i1 + 1], return_counts=True)
+                    top = str(seen[cnt.argmax()])
+                    sole = bool(top != own and cnt.max() >= 0.6 * (i1 - i0 + 1))
+                    looks = (" several chickens" if top == SEVERAL else f" {top}") if sole else \
+                        " a mix of " + "/".join(str(x) for x in seen[np.argsort(-cnt)] if x != own)
+                    key = f"stretch:{t}:{f0}:{f1}"
+                    if key in dismissed:
+                        continue
+                    where = "start" if i0 == 0 else "end" if i1 == len(fr) - 1 else "middle"
+                    cid = cid_of.get(top) if sole and top != SEVERAL else None
+                    fix = (f"Cut {clock(f0)}–{clock(f1)} out and give it to {top}" if cid is not None else
+                           f"Cut {clock(f0)}–{clock(f1)} out as \"several chickens\"" if sole else
+                           f"Cut {clock(f0)}–{clock(f1)} out so it can be named")
+                    out.append({"key": key, "kind": "stretch", "track": t, "from_frame": f0, "to_frame": f1,
+                                "seconds": round((f1 - f0 + 1) / fps, 1), "chicken": cid,
+                                "several": sole and top == SEVERAL,
+                                "title": f"{own}'s piece #{t}, {clock(f0)}–{clock(f1)} ({where}): the recogniser "
+                                         f"sees{looks} there, not {own}.", "fix": fix})
+                continue  # recogniser covers this piece: skip the embedding swap check
             # 3. look changes part-way: compare consecutive crops along the piece
             if t in feats_of and len(feats_of[t][0]) >= 4:
                 fr, ft = feats_of[t]
@@ -163,6 +289,9 @@ def apply_check(check: dict, data: dict, det: pd.DataFrame, run_dir, split_piece
     frames = np.sort(det.loc[det.track_id == t, "frame"].to_numpy())
     if check["kind"] == "swap":
         return split_piece(run_dir, data, det, t, int(frames[frames >= f0][0])), []
+    if check["kind"] == "recognizer":  # whole piece: no cut
+        apply_answer(data, t, check["chicken"], "multiple" if check.get("several") else "moved")
+        return det, []
     # isolate [f0, f1] of piece t: cut at the frame after f1 first, then at f0
     after = frames[frames > f1]
     if len(after):
@@ -171,6 +300,17 @@ def apply_check(check: dict, data: dict, det: pd.DataFrame, run_dir, split_piece
     if frames[0] < f0:
         det = split_piece(run_dir, data, det, t, int(f0))
         piece = data["splits"][-1]["new"]
+    if check["kind"] == "stretch":
+        if check.get("chicken") is not None:
+            apply_answer(data, piece, check["chicken"], "moved")
+            return det, []
+        if check.get("several"):
+            apply_answer(data, piece, None, "multiple")
+            return det, []
+        for c in data["chickens"]:  # unknown bird: take it off the hen, caller places it
+            if piece in c["tracks"]:
+                c["tracks"].remove(piece)
+        return det, [piece]
     if check["kind"] == "aside_single":
         if check.get("chicken") is not None:
             apply_answer(data, piece, check["chicken"], "moved")
