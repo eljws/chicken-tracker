@@ -33,6 +33,9 @@ import cv2
 OPEN_VOCAB_HINTS = ("yoloe", "world")
 
 CLASSES = {0: "chicken", 1: "feeder", 2: "water"}
+# chicken "skeleton" for the pose model, in click order; seen from above, feet are mostly hidden
+KEYPOINTS = ["beak", "head", "neck", "back", "tail"]
+SKELETON = [(0, 1), (1, 2), (2, 3), (3, 4)]
 # text prompts per object class for the open-vocabulary proposal model
 OBJECT_PROMPTS = {1: ["feed tray", "bowl of chicken feed", "chicken feeder"],
                   2: ["plastic bottle", "chicken waterer", "water bowl"]}
@@ -48,6 +51,12 @@ class LabelStore:
         self._lock = threading.Lock()
         self.items: dict[str, dict] = json.loads(self.path.read_text()) if self.path.exists() else {}
 
+    def _reload(self) -> None:
+        """Pick up changes saved by another page (review / objects / pose) before changing anything,
+        so two pages open at once can't overwrite each other's work."""
+        if self.path.exists():
+            self.items = json.loads(self.path.read_text())
+
     def save(self) -> None:
         with self._lock:
             fd, tmp = tempfile.mkstemp(dir=self.root, suffix=".json")
@@ -55,10 +64,17 @@ class LabelStore:
                 json.dump(self.items, f, indent=1)
             os.replace(tmp, self.path)
 
-    def update(self, name: str, status: str, boxes: list[list[float]]) -> None:
+    def update(self, name: str, status: str, boxes: list[list[float]],
+               outlines: list | None = None) -> None:
+        """outlines: optional, one per box - a [[x, y], ...] polygon (click-to-outline) or None."""
         with self._lock:
+            self._reload()
             self.items[name]["status"] = status
             self.items[name]["boxes"] = [[round(float(v), 1) for v in b[:4]] for b in boxes]
+            if outlines is not None and len(outlines) == len(boxes) and any(outlines):
+                self.items[name]["outlines"] = outlines
+            else:
+                self.items[name].pop("outlines", None)
         self.save()
 
     def update_objects(self, name: str, status: str, objects: list[list[float]],
@@ -69,10 +85,34 @@ class LabelStore:
         (static camera) starts out rejected in other frames.
         """
         with self._lock:
+            self._reload()
             self.items[name]["obj_status"] = status
             self.items[name]["objects"] = [[*(round(float(v), 1) for v in b[:4]), int(b[4])]
                                            for b in objects if int(b[4]) in OBJECT_PROMPTS]
             self.items[name]["obj_rejected"] = [[round(float(v), 1) for v in b[:4]] for b in rejected]
+        self.save()
+
+    def init_pose(self) -> int:
+        """Make reviewed frames with chickens available to the pose pass; returns how many."""
+        n = 0
+        with self._lock:
+            self._reload()
+            for it in self.items.values():
+                if it["status"] == "done" and it["boxes"] and "pose_status" not in it:
+                    it["pose_status"] = "pending"
+                    n += 1
+        if n:
+            self.save()
+        return n
+
+    def update_pose(self, name: str, status: str, poses: list) -> None:
+        """poses: one per box - [[x, y, v] x len(KEYPOINTS)] (v 2 = seen, 0 = hidden) or None (skipped hen)."""
+        with self._lock:
+            self._reload()
+            it = self.items[name]
+            it["pose_status"] = status
+            it["poses"] = [None if p is None else [[round(float(x), 1), round(float(y), 1), int(v)] for x, y, v in p]
+                           for p in poses][:len(it["boxes"])]
         self.save()
 
     def counts(self, key: str = "status") -> dict[str, int]:
@@ -168,6 +208,117 @@ def mine(
             "added": len(keep), "total_in_dataset": len(store.items)}
 
 
+def _nms(boxes: list[list[float]], iou: float) -> list[list[float]]:
+    """Greedy NMS over [x1, y1, x2, y2, conf] boxes (highest conf first)."""
+    keep: list[list[float]] = []
+    for b in sorted(boxes, key=lambda b: -b[4]):
+        if all(_iou(b, k) < iou for k in keep):
+            keep.append(b)
+    return keep
+
+
+def _iou(a, b) -> float:
+    w = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    h = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    i = w * h
+    return i / ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - i + 1e-9)
+
+
+def _inside(small, big) -> float:
+    """Fraction of `small` covered by `big`."""
+    w = max(0.0, min(small[2], big[2]) - max(small[0], big[0]))
+    h = max(0.0, min(small[3], big[3]) - max(small[1], big[1]))
+    return w * h / ((small[2] - small[0]) * (small[3] - small[1]) + 1e-9)
+
+
+def split_merged(props: list[list[float]], dup_iou: float = 0.6) -> tuple[list[list[float]], list[list[float]]]:
+    """(single-bird suggestions, merged-box suggestions).
+
+    Near-duplicates are dropped; a box mostly containing two or more other suggestions is
+    a merged box (several birds in one), shown pre-rejected in review.
+    """
+    kept = _nms(props, dup_iou)
+    merged = [b for b in kept if sum(_inside(o, b) >= 0.7 for o in kept if o is not b
+                                         and (o[2] - o[0]) * (o[3] - o[1]) < (b[2] - b[0]) * (b[3] - b[1])) >= 2]
+    return [b for b in kept if b not in merged], merged
+
+
+def mine_crowded(run_dir: Path, root: Path, model: str, n: int = 80, min_gap_s: float = 1.5,
+                 video: str | None = None, device: str | None = None, conf: float = 0.05,
+                 imgsz: int = 1280) -> dict:
+    """Add frames where hens bunch up - the ones the detector boxes as one - for review.
+
+    Picks frames from pieces set aside as "several chickens" (the detector's merged boxes)
+    and frames where named birds' boxes overlap, spread over time. Suggestions come from
+    the trained detector at low confidence with lenient overlap suppression, plus the
+    open-vocabulary model, so separate birds inside a merged box are offered too. These
+    frames are reviewed first (priority 1).
+    """
+    import numpy as np
+    import pandas as pd
+
+    from .identity import IdentityStore, load_detections
+
+    run_dir = Path(run_dir)
+    data = IdentityStore(run_dir).data
+    det = load_detections(run_dir, data)
+    fps, video = data["fps"], video or data["video"]
+    multi = set(data.get("multiple", []))
+    # crowding per frame: merged boxes count most, then overlapping/touching boxes
+    xy = det[["x1", "y1", "x2", "y2"]].to_numpy()
+    score: dict[int, float] = {}
+    for f, idx in det.groupby("frame").indices.items():
+        s = 3.0 * sum(int(t) in multi for t in det.track_id.to_numpy()[idx])
+        for a in range(len(idx)):
+            for b in range(a + 1, len(idx)):
+                if _iou(xy[idx[a]], xy[idx[b]]) > 0.02:
+                    s += 1.0
+        if s > 0:
+            score[int(f)] = s
+    store = LabelStore(root)
+    store.images.mkdir(parents=True, exist_ok=True)
+    stem = Path(video).stem
+    taken = [it["frame"] for it in store.items.values() if Path(it["video"]).stem == stem]
+    gap = min_gap_s * fps
+    chosen: list[int] = []
+    for f in sorted(score, key=lambda f: (-score[f], f)):  # most crowded first, kept apart in time
+        if all(abs(f - g) >= gap for g in chosen + taken):
+            chosen.append(f)
+        if len(chosen) >= n:
+            break
+    chosen.sort()
+    trained = load_detector(model, ["chicken"])
+    openv = load_detector("yoloe-11l-seg.pt", ["chicken"])
+    cap = cv2.VideoCapture(str(video))
+    added, pos = 0, 0
+    for f in chosen:
+        if f - pos > 150 or f < pos:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, f)
+            pos = f
+        while pos < f:
+            cap.grab()
+            pos += 1
+        ok, frame = cap.read()
+        pos += 1
+        if not ok:
+            break
+        props = []
+        for m, c in ((trained, conf), (openv, 0.1)):
+            r = m.predict(frame, conf=c, iou=0.8, imgsz=imgsz, device=device, max_det=20, verbose=False)[0]
+            props += [[*(round(float(v), 1) for v in b), round(float(k), 3)]
+                      for b, k in zip(r.boxes.xyxy.cpu().numpy(), r.boxes.conf.cpu().numpy())]
+        name = f"{stem}__f{f:07d}.jpg"
+        cv2.imwrite(str(store.images / name), frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        single, merged = split_merged(props)
+        store.items[name] = {"video": str(video), "frame": int(f), "time_s": round(f / fps, 2),
+                             "proposals": single[:12], "merged": merged, "boxes": [], "status": "pending",
+                             "priority": 1, "source": "crowded"}
+        added += 1
+    cap.release()
+    store.save()
+    return {"added": added, "crowded_frames_seen": len(score), "total_in_dataset": len(store.items)}
+
+
 def mine_objects(root: Path, model: str = "yoloe-11l-seg.pt", conf: float = 0.05,
                  imgsz: int = 1280, max_boxes: int = 8, device: str | None = None) -> dict:
     """Add feeder/water suggestions to every frame already in the dataset."""
@@ -213,20 +364,22 @@ def split_train_val(items: dict[str, dict], val_frac: float = 0.2, block: int = 
 
     Frames are sorted by time and grouped into blocks of ``block`` consecutive samples;
     every k-th block goes to val. Neighbouring (near-identical) frames therefore stay
-    on the same side, and doing it separately for frames with and without chickens
-    guarantees val contains chickens.
+    on the same side, and doing it separately for frames with and without chickens (and
+    for crowded frames) guarantees val contains each kind. Adding a new kind of frame
+    leaves the split of the others unchanged.
     """
     every = max(2, round(1 / val_frac))
     splits: dict[str, str] = {}
-    for has_chickens in (True, False):
-        keys = sorted((k for k, v in items.items() if bool(v["boxes"]) == has_chickens),
+    kind = lambda v: (bool(v["boxes"]), v.get("source", ""))
+    for group in sorted({kind(v) for v in items.values()}):
+        keys = sorted((k for k, v in items.items() if kind(v) == group),
                       key=lambda k: (items[k]["video"], items[k]["frame"]))
         for i, k in enumerate(keys):
             splits[k] = "val" if (i // block) % every == every // 2 else "train"
     return splits
 
 
-def export_yolo(root: Path, class_name: str = "chicken") -> Path:
+def export_yolo(root: Path, class_name: str = "chicken", with_objects: bool = False) -> Path:
     """Write reviewed frames as a YOLO dataset; returns path to data.yaml."""
     store = LabelStore(root)
     out = Path(root) / "yolo"
@@ -235,7 +388,8 @@ def export_yolo(root: Path, class_name: str = "chicken") -> Path:
     done = {k: v for k, v in store.items.items() if v["status"] == "done"}
     if not done:
         raise SystemExit("No reviewed frames yet - run `chicken-tracker review` first.")
-    with_objects = any(v.get("obj_status") == "done" for v in store.items.values())
+    # Feeders/water come from stations.json, so the detector only needs chickens. Opt in to
+    # also learning feeder/water (needs the objects pass done on most frames).
     if with_objects:
         # only frames where feeders/water were reviewed too, else they'd be learnt as background
         done = {k: v for k, v in done.items() if v.get("obj_status") == "done"}
@@ -275,17 +429,95 @@ def export_yolo(root: Path, class_name: str = "chicken") -> Path:
 
 
 def train(root: Path, model: str = "yolo11s.pt", epochs: int = 100, imgsz: int = 1280,
-          batch: int = 8, device: str | None = None) -> Path:
+          batch: int = 8, device: str | None = None, with_objects: bool = False,
+          name: str = "chicken") -> Path:
     from ultralytics import YOLO
 
-    data = export_yolo(root)
+    data = export_yolo(root, with_objects=with_objects)
     runs = (Path(root) / "runs").resolve()
     YOLO(model).train(data=str(data), epochs=epochs, imgsz=imgsz, batch=batch, device=device,
-                      project=str(runs), name="chicken", exist_ok=True, patience=50,
+                      project=str(runs), name=name, exist_ok=True, patience=50,
                       # Ultralytics' "auto" optimizer picks AdamW for small datasets, which diverged
                       # here (val cls loss -> 1e7, mAP 0). Plain SGD fine-tuning is stable.
                       optimizer="SGD", lr0=0.01,
                       fliplr=0.5, flipud=0.0, mosaic=1.0)
-    best = runs / "chicken" / "weights" / "best.pt"
+    best = runs / name / "weights" / "best.pt"
     print(f"\nTrained model: {best}\nUse it with: chicken-tracker process VIDEO --model {best}")
+    return best
+
+
+# ---------------------------------------------------------------- chicken skeletons (pose)
+
+def _frame_poses(it: dict, use_auto: bool, min_auto_conf: int) -> list | None:
+    """Skeletons to train on for one frame: yours if you did this frame, else confident auto ones."""
+    if it.get("pose_status") == "done" and any(it.get("poses") or []):
+        return it["poses"]
+    if use_auto and it.get("auto_poses"):
+        ps = [p["pts"] if p and p["conf"] >= min_auto_conf else None for p in it["auto_poses"]]
+        return ps if any(ps) else None
+    return None
+
+
+def export_pose(root: Path, use_auto: bool = True, min_auto_conf: int = 2) -> Path:
+    """Frames with skeletons, as a YOLO pose dataset; returns data.yaml.
+
+    Your skeletons (``review --pose``) always win; frames you haven't done use automatic
+    skeletons (``auto_poses``, from outlines + movement/feeder/comb cues) whose head direction
+    was confirmed by at least one strong cue. Every boxed hen is written (a box without a
+    skeleton gets hidden keypoints), so no hen in a labelled frame is taught as background.
+    """
+    store = LabelStore(root)
+    out = Path(root) / "yolo_pose"
+    if out.exists():
+        shutil.rmtree(out)
+    done = {}
+    for k, v in store.items.items():
+        ps = _frame_poses(v, use_auto, min_auto_conf) if v["status"] == "done" and v["boxes"] else None
+        if ps:
+            done[k] = {**v, "poses": ps}
+    if not done:
+        raise SystemExit("No skeletons yet - run `chicken-tracker review --pose` first.")
+    splits = split_train_val(done)
+    for split in ("train", "val"):
+        (out / "images" / split).mkdir(parents=True)
+        (out / "labels" / split).mkdir(parents=True)
+    nk = len(KEYPOINTS)
+    for name, it in done.items():
+        split = splits[name]
+        src = store.images / name
+        h, w = cv2.imread(str(src)).shape[:2]
+        try:
+            os.link(src, out / "images" / split / name)
+        except OSError:
+            shutil.copy2(src, out / "images" / split / name)
+        poses = (it.get("poses") or []) + [None] * len(it["boxes"])
+        lines = []
+        for (x1, y1, x2, y2), pose in zip(it["boxes"], poses):
+            kp = []
+            for x, y, v in (pose or [[0, 0, 0]] * nk):
+                kp += [f"{x / w:.6f}", f"{y / h:.6f}", str(int(v))] if v else ["0", "0", "0"]
+            lines.append(" ".join([f"0 {(x1 + x2) / 2 / w:.6f} {(y1 + y2) / 2 / h:.6f} "
+                                   f"{abs(x2 - x1) / w:.6f} {abs(y2 - y1) / h:.6f}", *kp]))
+        (out / "labels" / split / (Path(name).stem + ".txt")).write_text("\n".join(lines))
+    data = out / "data.yaml"
+    data.write_text(f"path: {out.resolve()}\ntrain: images/train\nval: images/val\n"
+                    f"kpt_shape: [{nk}, 3]\nflip_idx: {list(range(nk))}\n"  # midline points: a flip keeps them
+                    f"kpt_names:\n  0: {KEYPOINTS}\nnames:\n  0: chicken\n")
+    n_val = sum(1 for s in splits.values() if s == "val")
+    hens = sum(1 for v in done.values() for p in v["poses"] if p)
+    print(f"Exported {len(done)} frames, {hens} skeletons ({len(done) - n_val} train / {n_val} val frames) -> {data}")
+    return data
+
+
+def train_pose(root: Path, model: str = "yolo11s-pose.pt", epochs: int = 150, imgsz: int = 1280,
+               batch: int = 8, device: str | None = None, use_auto: bool = True) -> Path:
+    from ultralytics import YOLO
+
+    data = export_pose(root, use_auto=use_auto)
+    runs = (Path(root) / "runs").resolve()
+    YOLO(model).train(data=str(data), epochs=epochs, imgsz=imgsz, batch=batch, device=device,
+                      project=str(runs), name="pose", exist_ok=True, patience=50,
+                      optimizer="SGD", lr0=0.01, fliplr=0.5, flipud=0.0, mosaic=1.0)
+    best = runs / "pose" / "weights" / "best.pt"
+    print(f"\nTrained skeleton model: {best}")
     return best

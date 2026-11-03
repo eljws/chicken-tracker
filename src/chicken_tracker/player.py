@@ -129,7 +129,13 @@ def build_overlay(run_dir: Path, video: str | None = None) -> dict:
                                   for k, v in r.items() if k in (
                                       "visible_s", "hidden_s", "distance_m", "speed_m_per_min", "top_speed_m_s",
                                       "brisk_speed_m_s", "top_accel_m_s2", "feeder_visits", "feeder_time_s",
-                                      "water_visits", "water_time_s")}
+                                      "water_visits", "water_time_s", "pecks_at_feeder", "pecks_ground")}
+    pecks: dict[str, list[int]] = {}  # frame -> [chicken, head x, head y, ...]
+    pk_p = run_dir / "pecks.csv"
+    if pk_p.exists():
+        for _, r in pd.read_csv(pk_p).iterrows():
+            if r.chicken in idx:
+                pecks.setdefault(str(int(r.frame)), []).extend([idx[r.chicken], round(r.head_x), round(r.head_y)])
     moments = []
     fm_p = run_dir / "fast_moments.csv"
     if fm_p.exists():
@@ -143,7 +149,7 @@ def build_overlay(run_dir: Path, video: str | None = None) -> dict:
         "chickens": [{"name": n, "color": _color(n), **({"summary": summary[n]} if n in summary else {})}
                      for n in names],
         "stations": stations, "hidden": hidden, "moments": moments,
-        "frames": frames, "groups": groups,
+        "frames": frames, "groups": groups, "pecks": pecks,
     }
 
 
@@ -154,13 +160,27 @@ def make_handler(run_dir: Path, video_path: Path, source_video: str | None):
 
     def overlay_bytes() -> bytes:
         deps = [run_dir / n for n in ("detections_named.csv", "chicken_timeline.csv", "chickens.csv",
-                                      "fast_moments.csv", "stations.json", "identity/identity.json")]
+                                      "fast_moments.csv", "stations.json", "identity/identity.json", "pecks.csv")]
         key = tuple(p.stat().st_mtime if p.exists() else 0 for p in deps)
         with lock:
             if cache.get("key") != key:
                 cache["key"] = key
                 cache["data"] = json.dumps(build_overlay(run_dir, source_video), separators=(",", ":")).encode()
             return cache["data"]
+
+    def poses_bytes() -> bytes:
+        from .pose import overlay_poses
+
+        p = run_dir / "poses.csv"
+        key = ("poses", p.stat().st_mtime if p.exists() else 0, cache.get("key"))
+        with lock:
+            if cache.get("poses_key") != key:
+                names = [c["name"] for c in json.loads(cache["data"])["chickens"]] if "data" in cache else \
+                    sorted(pd.read_csv(run_dir / "detections_named.csv").chicken.unique())
+                cache["poses_key"] = key
+                cache["poses"] = json.dumps(overlay_poses(run_dir, names) or {"frames": {}},
+                                            separators=(",", ":")).encode()
+            return cache["poses"]
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -225,6 +245,8 @@ def make_handler(run_dir: Path, video_path: Path, source_video: str | None):
                 return self._send(page, "text/html; charset=utf-8")
             if path == "/overlay.json":
                 return self._send(overlay_bytes(), "application/json")
+            if path == "/poses.json":  # skeleton layer: fetched only when switched on
+                return self._send(poses_bytes(), "application/json")
             if path == "/video.mp4":
                 return self._video()
             self._send(b'{"error":"not found"}', "application/json", 404)

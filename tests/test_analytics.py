@@ -123,7 +123,7 @@ def test_split_has_chickens_in_val():
 
 def test_export_with_objects(tmp_path):
     import json
-    import cv2
+    import cv2, json
     from chicken_tracker.labeling import LabelStore, export_yolo
 
     (tmp_path / "images").mkdir()
@@ -140,7 +140,8 @@ def test_export_with_objects(tmp_path):
     st = LabelStore(tmp_path)
     for k in list(st.items)[:6]:
         st.update_objects(k, "done", [[50, 50, 90, 70, 1], [100, 20, 120, 60, 2]])
-    data = export_yolo(tmp_path)
+    assert "feeder" not in export_yolo(tmp_path).read_text()  # chickens only unless asked
+    data = export_yolo(tmp_path, with_objects=True)
     assert "1: feeder" in data.read_text() and "2: water" in data.read_text()
     labels = list((tmp_path / "yolo" / "labels").rglob("*.txt"))
     assert len(labels) == 6                             # frames without the objects pass are left out
@@ -179,3 +180,130 @@ def test_player_server_byte_ranges(tmp_path):
             assert e.code == 416
     finally:
         srv.shutdown()
+
+
+def test_split_keeps_old_frames_when_crowded_frames_are_added():
+    from chicken_tracker.labeling import split_train_val
+    items = {f"a{i}": {"video": "v", "frame": i, "boxes": [[0, 0, 1, 1]]} for i in range(40)}
+    before = split_train_val(items)
+    items |= {f"c{i}": {"video": "w", "frame": i, "boxes": [[0, 0, 1, 1]], "source": "crowded"} for i in range(40)}
+    after = split_train_val(items)
+    assert all(after[k] == v for k, v in before.items())
+    assert sum(after[f"c{i}"] == "val" for i in range(40)) == 10
+
+
+def test_mask_to_outline_keeps_clicked_piece():
+    from chicken_tracker.outline import mask_to_outline
+    m = np.zeros((100, 200), np.uint8)
+    m[10:40, 20:60] = 1      # the hen clicked
+    m[60:90, 120:190] = 1    # a separate blob (neighbour) in the same mask
+    out = mask_to_outline(m, [30, 20])
+    assert out["box"] == [20.0, 10.0, 60.0, 40.0] and len(out["poly"]) >= 4
+    assert mask_to_outline(m, [5, 95])["box"][0] == 120.0   # off-mask click: biggest piece
+    assert mask_to_outline(np.zeros((10, 10), np.uint8), [1, 1]) is None
+
+
+def test_review_server_outline_and_saved_outlines(tmp_path):
+    import threading, urllib.request
+    import cv2, json
+    from http.server import ThreadingHTTPServer
+    from chicken_tracker.labeling import LabelStore
+    from chicken_tracker.review_server import make_handler
+    (tmp_path / "images").mkdir()
+    cv2.imwrite(str(tmp_path / "images" / "a.jpg"), np.zeros((50, 50, 3), np.uint8))
+    (tmp_path / "labels.json").write_text(json.dumps({"a.jpg": {"video": "v", "frame": 0, "time_s": 0,
+                                                                "proposals": [], "boxes": [], "status": "pending"}}))
+    store = LabelStore(tmp_path)
+
+    class Fake:
+        def outline(self, image, points, labels):
+            assert labels == [1, 0]
+            return {"box": [1.0, 2.0, 3.0, 4.0], "poly": [[1, 2], [3, 2], [3, 4]]}
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(store, outliner=Fake()))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    post = lambda path, body: json.loads(urllib.request.urlopen(urllib.request.Request(
+        base + path, json.dumps(body).encode(), {"Content-Type": "application/json"})).read())
+    try:
+        assert json.loads(urllib.request.urlopen(base + "/api/config").read())["outline"] is True
+        assert post("/api/outline/a.jpg", {"points": [[5, 5], [9, 9]], "labels": [1, 0]})["box"] == [1.0, 2.0, 3.0, 4.0]
+        post("/api/item/a.jpg", {"status": "done", "boxes": [[1, 2, 3, 4], [5, 5, 9, 9]],
+                                 "outlines": [[[1, 2], [3, 2], [3, 4]], None]})
+        it = LabelStore(tmp_path).items["a.jpg"]
+        assert it["outlines"][0] == [[1, 2], [3, 2], [3, 4]] and it["outlines"][1] is None
+    finally:
+        srv.shutdown()
+
+
+def test_pose_labels_export_and_shared_saves(tmp_path):
+    import cv2, json
+    from chicken_tracker.labeling import KEYPOINTS, LabelStore, export_pose
+    (tmp_path / "images").mkdir()
+    items = {}
+    for i in range(6):
+        n = f"v__f{i:07d}.jpg"
+        cv2.imwrite(str(tmp_path / "images" / n), np.zeros((100, 200, 3), np.uint8))
+        items[n] = {"video": "v", "frame": i * 100, "time_s": i, "proposals": [], "status": "done",
+                    "boxes": [[10, 10, 50, 50], [100, 10, 140, 50]]}
+    (tmp_path / "labels.json").write_text(json.dumps(items))
+    pose_page, review_page = LabelStore(tmp_path), LabelStore(tmp_path)
+    assert pose_page.init_pose() == 6
+    skel = [[20, 20, 2], [25, 22, 2], [30, 30, 2], [35, 35, 2], [0, 0, 0]]  # tail hidden
+    for n in items:
+        pose_page.update_pose(n, "done", [skel, None])
+    review_page.update("v__f0000000.jpg", "done", [[10, 10, 50, 50], [100, 10, 140, 50]])  # stale copy saves
+    it = LabelStore(tmp_path).items["v__f0000000.jpg"]
+    assert it["poses"][0] == skel and it["pose_status"] == "done"   # not wiped by the other page
+    data = export_pose(tmp_path)
+    assert f"kpt_shape: [{len(KEYPOINTS)}, 3]" in data.read_text()
+    line = next((tmp_path / "yolo_pose" / "labels").rglob("*.txt")).read_text().splitlines()
+    assert len(line) == 2 and len(line[0].split()) == 5 + 3 * len(KEYPOINTS)
+    assert line[1].split()[5:] == ["0"] * (3 * len(KEYPOINTS))      # skipped hen: box kept, points hidden
+
+
+def test_overlay_poses_format(tmp_path):
+    import pandas as pd
+    from chicken_tracker.labeling import KEYPOINTS
+    from chicken_tracker.pose import overlay_poses
+    assert overlay_poses(tmp_path, ["A"]) is None
+    row = {"frame": 7, "track_id": 1, "chicken": "B"}
+    for i, k in enumerate(KEYPOINTS):
+        row |= {f"{k}_x": 10.4 + i, f"{k}_y": 20.6, f"{k}_c": 0.9 if i else 0.2}   # beak unsure
+    pd.DataFrame([row, {**row, "chicken": "Z"}]).to_csv(tmp_path / "poses.csv", index=False)
+    d = overlay_poses(tmp_path, ["A", "B"])
+    assert list(d["frames"]) == ["7"]                     # unknown hen Z dropped
+    f = d["frames"]["7"]
+    assert len(f) == 1 + 3 * len(KEYPOINTS) and f[0] == 1  # B is index 1
+    assert f[1:4] == [10, 21, 0] and f[4:7] == [11, 21, 1]  # beak hidden (low conf), head shown
+
+
+def test_pecking_head_moves_body_still(tmp_path):
+    import cv2, pandas as pd
+    from chicken_tracker.behaviour import find_pecks, motion_signals
+    from chicken_tracker.labeling import KEYPOINTS
+    fps, n = 10.0, 60
+    path = str(tmp_path / "v.avi")
+    vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"MJPG"), fps, (200, 120))
+    rows = []
+    for f in range(n):
+        img = np.full((120, 200, 3), 90, np.uint8)
+        walking = f >= 40
+        bx = 60 + (f - 40) * 6 if walking else 60          # body: still, then walks right
+        cv2.circle(img, (bx, 60), 14, (200, 200, 200), -1)
+        head_down = (f % 4 == 0) and not walking               # a peck every 0.4 s while standing
+        hx, hy = bx + 25, 60 + (10 if head_down else 0)
+        cv2.circle(img, (hx, hy), 6, (20, 20, 20), -1)       # dark head on grey ground
+        vw.write(img)
+        row = {"frame": f, "chicken": "A", "track_id": 1}
+        pts = {"beak": (hx + 6, hy), "head": (hx, 65), "neck": (bx + 15, 60), "back": (bx, 60), "tail": (bx - 15, 60)}
+        for k in KEYPOINTS:
+            row |= {f"{k}_x": pts[k][0], f"{k}_y": pts[k][1], f"{k}_c": 0.9}
+        rows.append(row)
+    vw.release()
+    sig = motion_signals(path, pd.DataFrame(rows), progress=False)
+    pecks = find_pecks(sig, fps, [{"id": "feeder 1", "type": "feeder", "box": [80, 55, 100, 80]}])
+    standing = pecks[pecks.frame < 40]
+    assert 8 <= len(standing) <= 12                            # ~10 pecks in 4 s
+    assert len(pecks[pecks.frame >= 41]) == 0                  # walking: body moves, no pecks
+    assert (standing["where"] == "feeder 1").all()
