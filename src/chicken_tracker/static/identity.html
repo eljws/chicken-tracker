@@ -283,7 +283,7 @@ async function renderChecks() {
     const r = await (await fetch("/api/check/" + encodeURIComponent(selCheck))).json();
     if (!r.error) c = r; else selCheck = null;
   }
-  const KIND = { aside_single: "Set aside, but one bird", merged_inside: "Two birds in a named box", swap: "Possible bird swap" };
+  const KIND = { aside_single: "Set aside, but one bird", merged_inside: "Two birds in a named box", swap: "Possible bird swap", recognizer: "Recogniser disagrees", stretch: "Part of the piece is another bird" };
   $("#main").innerHTML = `
     <div class="hint">Automatic checks for mistakes the conflicts and questions can't see. Look at the frames
       (yellow = the stretch in question) and either apply the suggested fix or mark it as fine.

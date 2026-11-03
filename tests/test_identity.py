@@ -293,3 +293,45 @@ def test_checks_find_single_bird_in_aside_and_merged_box():
     assert 45 <= merged["from_frame"] <= 55 and 95 <= merged["to_frame"] <= 105
     d["dismissed_checks"] = [merged["key"]]
     assert all(c["key"] != merged["key"] for c in run_checks(d, det, named, picks, feats, fr, fps))
+
+
+def test_recognizer_checks_mislabel_and_stretch():
+    import pandas as pd
+    from chicken_tracker.checks import apply_check, run_checks
+    fps = 10.0
+    rows = []
+    for t, f0 in ((1, 0), (2, 300), (3, 600)):  # three named single-bird pieces, 20 s each
+        for f in range(200):
+            rows.append({"frame": f0 + f, "time_s": (f0 + f) / fps, "track_id": t,
+                         "x1": 0, "y1": 360, "x2": 40, "y2": 400})
+    det = pd.DataFrame(rows)
+    fr = {1: frag(1, 0, 19.9, A), 2: frag(2, 30, 49.9, A), 3: frag(3, 60, 79.9, B)}
+    d = _data(fr, [[1, 2], [3]])
+    I.rename(d, 0, "Rocky"); I.rename(d, 1, "Monster")
+    named = det.assign(chicken="Rocky")
+    picks = pd.DataFrame({"track_id": [1, 2, 3], "frame": [10, 310, 610]})
+    feats = np.stack([fr[1].emb, fr[2].emb, fr[3].emb])
+    classes = ["Monster", "Rocky", "several"]
+    # 1 crop/s: piece 1 Rocky throughout, piece 2 all Monster (mislabel), piece 3 Monster then Rocky (swap)
+    pr = []
+    for t, f0 in ((1, 0), (2, 300), (3, 600)):
+        for k in range(20):
+            who = {1: "Rocky", 2: "Monster", 3: "Monster" if k < 10 else "Rocky"}[t]
+            p = [0.05, 0.05, 0.05]; p[classes.index(who)] = 0.9
+            pr.append({"frame": f0 + k * 10, "track_id": t, "crowd": 0.0, **{f"p_{c}": v for c, v in zip(classes, p)}})
+    recog = (pd.DataFrame(pr), classes)
+    checks = run_checks(d, det, named, picks, feats, fr, fps, recog=recog)
+    by = {(c["kind"], c["track"]): c for c in checks}
+    assert ("recognizer", 2) in by and by[("recognizer", 2)]["chicken"] == 1
+    st = by[("stretch", 3)]  # Monster's piece turns into Rocky half-way: cut from ~1:10 to the end, to Rocky
+    assert 690 <= st["from_frame"] <= 700 and st["to_frame"] == 799 and st["chicken"] == 0
+    assert not any(c["track"] == 1 for c in checks)
+    apply_check(by[("recognizer", 2)], d, det, None, None)
+    assert 2 in next(c for c in d["chickens"] if c["name"] == "Monster")["tracks"]
+
+
+def test_rec_stretches_tolerate_one_right_crop():
+    from chicken_tracker.checks import _rec_stretches
+    w = np.array([0, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0], bool)
+    assert _rec_stretches(w) == [(2, 7)]
+    assert _rec_stretches(np.array([1, 0, 1, 0, 1, 0], bool)) == []  # joined, but only 5 crops at 60%
