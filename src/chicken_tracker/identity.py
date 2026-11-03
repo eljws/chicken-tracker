@@ -829,6 +829,8 @@ def export(run_dir: Path, max_hidden_s: float = 120.0, hidden_tau_s: float = 20.
                 for f in BOX_FLAGS for t in sorted(data.get(f, []))]
     from .stations import write_station_analytics
     write_station_analytics(run_dir, fps)
+    from .behaviour import merge_peck_counts
+    merge_peck_counts(run_dir)  # keep peck counts when naming edits rebuild chickens.csv
     pd.DataFrame(flagged, columns=["track_id", "reason", "chicken"]).to_csv(run_dir / "flagged_pieces.csv", index=False)
     return {"chickens": len(summary), "timeline_segments": len(timeline),
             "not_chicken": len(data.get("rejected", [])), "multiple": len(data.get("multiple", [])),

@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Chicken skeletons</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #141414; color: #eee; font: 14px/1.4 system-ui, sans-serif;
+         display: flex; flex-direction: column; height: 100vh; }
+  header { display: flex; gap: 18px; align-items: center; padding: 8px 14px; background: #1f1f1f; flex-wrap: wrap; }
+  #ask { font-size: 22px; font-weight: 700; min-width: 260px; }
+  .keys span { margin-right: 12px; color: #bbb; }
+  kbd { background: #333; border: 1px solid #555; border-radius: 4px; padding: 0 6px; color: #fff; }
+  .right { margin-left: auto; text-align: right; color: #bbb; }
+  #bar { height: 4px; background: #333; } #bar div { height: 100%; background: #4caf50; width: 0; }
+  main { flex: 1; display: flex; gap: 10px; padding: 10px; min-height: 0; }
+  #zoomwrap { flex: 3; display: flex; justify-content: center; align-items: center; min-width: 0; }
+  #zoom { max-width: 100%; max-height: 100%; cursor: crosshair; image-rendering: auto; }
+  aside { flex: 1.3; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  #over { width: 100%; }
+  #steps div { padding: 3px 8px; border-radius: 4px; margin: 2px 0; color: #999; }
+  #steps div.now { background: #333; color: #fff; font-weight: 600; }
+  #steps i { display: inline-block; width: 12px; height: 12px; border-radius: 6px; margin-right: 8px; vertical-align: -1px; }
+  #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #333;
+           padding: 8px 16px; border-radius: 6px; opacity: 0; transition: opacity .3s; }
+  .hint { color: #999; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <div id="ask">…</div>
+  <div class="keys">
+    <span>click = place point</span>
+    <span><kbd>X</kbd> hidden / can't see</span>
+    <span><kbd>⌫</kbd> undo point</span>
+    <span><kbd>N</kbd> skip this hen</span>
+    <span><kbd>S</kbd> skip frame</span>
+    <span><kbd>←</kbd><kbd>→</kbd> frames</span>
+  </div>
+  <div class="right"><div id="prog"></div><div id="meta"></div></div>
+</header>
+<div id="bar"><div></div></div>
+<main>
+  <div id="zoomwrap"><canvas id="zoom"></canvas></div>
+  <aside>
+    <canvas id="over"></canvas>
+    <div id="steps"></div>
+    <div class="hint">Points go on the bird's midline, seen from above: tip of the beak, top of the head,
+      base of the neck, middle of the back, tip of the tail. Hen facing away, beak hidden? Press <kbd>X</kbd>
+      for the beak and carry on. The next hen comes up by itself; the frame saves after the last hen.</div>
+  </aside>
+</main>
+<div id="toast"></div>
+<script>
+const PCOL = ["#ff5252", "#ffb74d", "#ffee58", "#69f0ae", "#40c4ff", "#b388ff", "#f48fb1"];
+const zoom = document.getElementById("zoom"), zc = zoom.getContext("2d");
+const over = document.getElementById("over"), oc = over.getContext("2d");
+let KP = [], SK = [], items = [], idx = 0, counts = {}, img = new Image();
+let hen = 0, poses = [], view = null;
+
+async function load() {
+  const cfg = await (await fetch("/api/config")).json();
+  KP = cfg.keypoints; SK = cfg.skeleton;
+  const r = await (await fetch("/api/items")).json();
+  items = r.items; counts = r.counts;
+  const first = items.findIndex(it => it.pose_status === "pending");
+  show(first >= 0 ? first : 0);
+}
+
+function show(i) {
+  idx = Math.max(0, Math.min(items.length - 1, i));
+  const it = items[idx];
+  poses = it.boxes.map((_, k) => (it.poses && it.poses[k] !== undefined) ? it.poses[k] : []);
+  hen = poses.findIndex(p => p !== null && p.length < KP.length);
+  if (hen < 0) hen = 0;
+  img = new Image();
+  img.onload = () => { over.width = img.naturalWidth; over.height = img.naturalHeight; frameView(); draw(); };
+  img.src = "/img/" + encodeURIComponent(it.name);
+  const done = (counts.done || 0) + (counts.skipped || 0), total = items.length;
+  document.getElementById("prog").textContent = `${done} / ${total} frames · frame ${idx + 1}`;
+  document.querySelector("#bar div").style.width = (100 * done / total) + "%";
+  const t = Math.round(it.time_s);
+  document.getElementById("meta").textContent =
+    `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")} · ${it.pose_status} · ${it.boxes.length} hens`;
+}
+
+// zoomed view around the current hen: her box padded by 60%, square-ish
+function frameView() {
+  const b = items[idx].boxes[hen];
+  if (!b) return;
+  const w = b[2] - b[0], h = b[3] - b[1], s = Math.max(w, h) * 1.6 + 40;
+  const cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
+  view = { x: cx - s / 2, y: cy - s / 2, s };
+  const px = Math.min(document.getElementById("zoomwrap").clientWidth, document.getElementById("zoomwrap").clientHeight);
+  zoom.width = zoom.height = Math.max(300, Math.floor(px));
+}
+const toImg = (x, y) => [view.x + x / zoom.width * view.s, view.y + y / zoom.height * view.s];
+const toZoom = (x, y) => [(x - view.x) / view.s * zoom.width, (y - view.y) / view.s * zoom.height];
+
+function drawPose(ctx, pose, map, r, lw) {
+  if (!pose) return;
+  ctx.lineWidth = lw; ctx.strokeStyle = "rgba(255,255,255,.85)";
+  for (const [a, b] of SK) {
+    if (pose[a] && pose[b] && pose[a][2] && pose[b][2]) {
+      const [x1, y1] = map(pose[a][0], pose[a][1]), [x2, y2] = map(pose[b][0], pose[b][1]);
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    }
+  }
+  pose.forEach((p, k) => {
+    if (!p[2]) return;
+    const [x, y] = map(p[0], p[1]);
+    ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fillStyle = PCOL[k]; ctx.fill();
+    ctx.lineWidth = Math.max(1, lw / 2); ctx.strokeStyle = "#000"; ctx.stroke();
+  });
+}
+
+function draw() {
+  const it = items[idx];
+  // overview: whole frame, all hens, current one highlighted
+  oc.drawImage(img, 0, 0);
+  const olw = Math.max(2, over.width / 400);
+  it.boxes.forEach((b, k) => {
+    oc.lineWidth = k === hen ? olw * 2 : olw;
+    oc.strokeStyle = poses[k] === null ? "#f44336" : k === hen ? "#ffee58" : poses[k].length === KP.length ? "#4caf50" : "#888";
+    oc.strokeRect(b[0], b[1], b[2] - b[0], b[3] - b[1]);
+    drawPose(oc, poses[k], (x, y) => [x, y], olw * 1.5, olw);
+  });
+  // zoom
+  if (!view) return;
+  zc.imageSmoothingQuality = "high";
+  zc.drawImage(img, view.x, view.y, view.s, view.s, 0, 0, zoom.width, zoom.height);
+  const sc = zoom.width / view.s;
+  it.boxes.forEach((b, k) => {
+    const [x1, y1] = toZoom(b[0], b[1]), [x2, y2] = toZoom(b[2], b[3]);
+    zc.setLineDash(k === hen ? [] : [6, 6]);
+    zc.lineWidth = k === hen ? 2 : 1; zc.strokeStyle = k === hen ? "rgba(255,238,88,.8)" : "rgba(255,255,255,.35)";
+    zc.strokeRect(x1, y1, x2 - x1, y2 - y1);
+  });
+  zc.setLineDash([]);
+  if (it.outlines && it.outlines[hen]) {
+    zc.beginPath(); it.outlines[hen].forEach(([x, y], i) => { const [a, b] = toZoom(x, y); i ? zc.lineTo(a, b) : zc.moveTo(a, b); });
+    zc.closePath(); zc.lineWidth = 1.5; zc.strokeStyle = "rgba(105,240,174,.6)"; zc.stroke();
+  }
+  it.boxes.forEach((_, k) => { if (k !== hen) drawPose(zc, poses[k], toZoom, 5, 2); });
+  drawPose(zc, poses[hen], toZoom, Math.max(6, sc * 3), 3);
+  // prompt
+  const p = poses[hen], k = p ? p.length : KP.length;
+  const ask = document.getElementById("ask");
+  if (p === null) { ask.textContent = `hen ${hen + 1}/${it.boxes.length}: skipped`; ask.style.color = "#f44336"; }
+  else if (k < KP.length) { ask.textContent = `hen ${hen + 1}/${it.boxes.length}: click the ${KP[k].toUpperCase()}`; ask.style.color = PCOL[k]; }
+  else { ask.textContent = `hen ${hen + 1}/${it.boxes.length}: done`; ask.style.color = "#4caf50"; }
+  document.getElementById("steps").innerHTML = KP.map((n, j) =>
+    `<div class="${p && j === k ? "now" : ""}"><i style="background:${PCOL[j]}"></i>${j + 1}. ${n}` +
+    `${p && j < p.length ? (p[j][2] ? " ✓" : " (hidden)") : ""}</div>`).join("");
+}
+
+function nextHen() {
+  const n = items[idx].boxes.length;
+  for (let k = 1; k <= n; k++) {
+    const j = (hen + k) % n;
+    if (poses[j] !== null && poses[j].length < KP.length) { hen = j; frameView(); draw(); return; }
+  }
+  save("done");  // every hen done or skipped
+}
+
+function addPoint(x, y, v) {
+  if (poses[hen] === null) poses[hen] = [];
+  poses[hen].push([x, y, v]);
+  if (poses[hen].length === KP.length) { draw(); setTimeout(nextHen, 250); } else draw();
+}
+
+zoom.addEventListener("click", e => {
+  if (!view || poses[hen] && poses[hen].length >= KP.length) return;
+  const r = zoom.getBoundingClientRect();
+  const [x, y] = toImg((e.clientX - r.left) * zoom.width / r.width, (e.clientY - r.top) * zoom.height / r.height);
+  addPoint(x, y, 2);
+});
+over.addEventListener("click", e => {  // pick a hen in the overview
+  const r = over.getBoundingClientRect();
+  const x = (e.clientX - r.left) * over.width / r.width, y = (e.clientY - r.top) * over.height / r.height;
+  const k = items[idx].boxes.findIndex(b => x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]);
+  if (k >= 0) { hen = k; if (poses[k] === null) poses[k] = []; frameView(); draw(); }
+});
+
+async function save(status) {
+  const it = items[idx];
+  const out = status === "done" ? poses.map(p => (p && p.length === KP.length) ? p : null) : [];
+  const r = await (await fetch("/api/item/" + encodeURIComponent(it.name), {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status, poses: out }),
+  })).json();
+  it.pose_status = status; it.poses = out; counts = r.counts;
+  const n = out.filter(Boolean).length;
+  toast(status === "skipped" ? "frame skipped" : `saved · ${n} skeleton${n === 1 ? "" : "s"}`);
+  const next = items.findIndex((x, j) => j > idx && x.pose_status === "pending");
+  if (next >= 0) show(next);
+  else { const any = items.findIndex(x => x.pose_status === "pending"); any >= 0 ? show(any) : toast("All frames done 🎉"); }
+}
+
+let tt;
+function toast(msg) {
+  const t = document.getElementById("toast"); t.textContent = msg; t.style.opacity = 1;
+  clearTimeout(tt); tt = setTimeout(() => t.style.opacity = 0, 1300);
+}
+
+window.addEventListener("keydown", e => {
+  const k = e.key.toLowerCase();
+  if (k === "x") { if (poses[hen] !== null && poses[hen].length < KP.length) addPoint(0, 0, 0); }
+  else if (k === "backspace") {
+    if (poses[hen] === null) poses[hen] = [];
+    else if (poses[hen].length) poses[hen].pop();
+    else if (hen > 0) { hen--; frameView(); if (poses[hen]) poses[hen].pop(); }
+    draw();
+  }
+  else if (k === "n") { poses[hen] = null; nextHen(); }
+  else if (k === "s") save("skipped");
+  else if (k === "arrowright") show(idx + 1);
+  else if (k === "arrowleft") show(idx - 1);
+  else return;
+  e.preventDefault();
+});
+window.addEventListener("resize", () => { frameView(); draw(); });
+load();
+</script>
+</body>
+</html>

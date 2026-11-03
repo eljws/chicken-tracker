@@ -29,6 +29,10 @@
     <span><kbd>Y</kbd>/<kbd>Enter</kbd> yes, save</span>
     <span><kbd>N</kbd> no chickens</span>
     <span>click box = toggle</span>
+    <span><kbd>⇧</kbd>click = toggle the big box</span>
+    <span id="okeys"><kbd>O</kbd> outline mode: click a hen = outline + tight box, <kbd>⇧</kbd>click = not this part
+      (or <kbd>⌥</kbd>click / <kbd>⇧⌥</kbd>click any time)</span>
+    <span id="omode" style="display:none;color:#4caf50;font-weight:600">● OUTLINE MODE</span>
     <span>drag = add chicken</span>
     <span><kbd>Z</kbd> undo add</span>
     <span><kbd>S</kbd> unsure, skip</span>
@@ -44,8 +48,11 @@
 const COLORS = { pending: "#ffc107", yes: "#4caf50", no: "#f44336" };
 const canvas = document.getElementById("c"), ctx = canvas.getContext("2d");
 let items = [], idx = 0, img = new Image(), boxes = [], drag = null, counts = {};
+let outlineOn = false, outlineMode = false, lastOutline = null, busy = false;
 
 async function load() {
+  try { outlineOn = (await (await fetch("/api/config")).json()).outline; } catch (e) { outlineOn = false; }
+  if (!outlineOn) document.getElementById("okeys").style.display = "none";
   const r = await (await fetch("/api/items")).json();
   items = r.items; counts = r.counts;
   const first = items.findIndex(it => it.status === "pending");
@@ -56,10 +63,13 @@ function show(i) {
   idx = Math.max(0, Math.min(items.length - 1, i));
   const it = items[idx];
   if (it.status === "pending") {
-    boxes = it.proposals.map(p => ({ b: p.slice(0, 4), conf: p[4], state: "pending" }));
+    boxes = it.proposals.map(p => ({ b: p.slice(0, 4), conf: p[4], state: "pending" }))
+      // boxes around several birds at once: start rejected (click to keep if it's really one bird)
+      .concat((it.merged || []).map(p => ({ b: p.slice(0, 4), conf: p[4], state: "no" })));
   } else {
-    boxes = it.boxes.map(b => ({ b, state: "yes", user: true }));
+    boxes = it.boxes.map((b, i) => ({ b, state: "yes", user: true, poly: (it.outlines || [])[i] || null }));
   }
+  lastOutline = null;
   img = new Image();
   img.onload = () => { canvas.width = img.naturalWidth; canvas.height = img.naturalHeight; draw(); };
   img.src = "/img/" + encodeURIComponent(it.name);
@@ -75,6 +85,19 @@ function draw() {
   ctx.drawImage(img, 0, 0);
   const lw = Math.max(2, canvas.width / 500), fs = Math.max(14, canvas.width / 70);
   ctx.font = `bold ${fs}px system-ui`;
+  for (const bx of boxes) {
+    if (bx.poly && bx.state !== "no") {
+      ctx.beginPath(); bx.poly.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath();
+      ctx.fillStyle = "rgba(76,175,80,0.35)"; ctx.fill();
+    }
+  }
+  if (lastOutline) {
+    lastOutline.pts.forEach(([x, y], i) => {
+      ctx.beginPath(); ctx.arc(x, y, lw * 2.5, 0, 7);
+      ctx.fillStyle = lastOutline.lbls[i] ? "#4caf50" : "#f44336"; ctx.fill();
+      ctx.lineWidth = lw / 2; ctx.strokeStyle = "#fff"; ctx.stroke();
+    });
+  }
   for (const bx of boxes) {
     const [x1, y1, x2, y2] = bx.b;
     ctx.lineWidth = lw; ctx.strokeStyle = COLORS[bx.state];
@@ -114,24 +137,56 @@ window.addEventListener("mouseup", e => {
       .map(v => Math.max(0, v));
     b[2] = Math.min(b[2], canvas.width); b[3] = Math.min(b[3], canvas.height);
     boxes.push({ b, state: "yes", user: true });
+  } else if (outlineOn && (outlineMode || e.altKey)) {
+    outlineAt(d.x0, d.y0, e.shiftKey);
+    return;
   } else {
     // click: toggle the smallest box under the cursor
     const hits = boxes.filter(bx => d.x0 >= bx.b[0] && d.x0 <= bx.b[2] && d.y0 >= bx.b[1] && d.y0 <= bx.b[3])
       .sort((a, b) => area(a.b) - area(b.b));
+    if (e.shiftKey) hits.reverse();  // shift-click: the biggest box (e.g. one around two birds)
     if (hits.length) hits[0].state = hits[0].state === "no" ? "yes" : "no";
   }
   draw();
 });
 const area = b => (b[2] - b[0]) * (b[3] - b[1]);
+function iou(a, b) {
+  const w = Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])), h = Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
+  return w * h / (area(a) + area(b) - w * h + 1e-9);
+}
+
+// click-to-outline: new hen, or (trim) "not this part" for the hen outlined last
+async function outlineAt(x, y, trim) {
+  if (busy) return;
+  if (trim && !lastOutline) { toast("outline a hen first, then ⇧click the part that isn't her"); return; }
+  const pts = trim ? [...lastOutline.pts, [x, y]] : [[x, y]];
+  const lbls = trim ? [...lastOutline.lbls, 0] : [1];
+  busy = true; canvas.style.cursor = "progress";
+  const slow = setTimeout(() => toast("outlining… (first one loads the model)"), 400);
+  try {
+    const r = await fetch("/api/outline/" + encodeURIComponent(items[idx].name), {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ points: pts, labels: lbls }) });
+    const out = await r.json();
+    if (!r.ok) { toast(out.error || "couldn't outline there"); return; }
+    let bx = trim ? lastOutline.bx : null;
+    if (!bx) { bx = { state: "yes", user: true }; boxes.push(bx); }
+    bx.b = out.box; bx.poly = out.poly;
+    lastOutline = { bx, pts, lbls };
+    // a suggestion for the same bird is now redundant
+    for (const o of boxes) if (o !== bx && !o.user && o.state !== "no" && iou(o.b, bx.b) > 0.5) o.state = "no";
+  } catch (e) { toast("outline failed - drag a box instead"); }
+  finally { clearTimeout(slow); busy = false; canvas.style.cursor = outlineMode ? "cell" : ""; draw(); }
+}
 
 async function save(status, keep) {
   const it = items[idx];
-  const kept = keep ? boxes.filter(bx => bx.state !== "no").map(bx => bx.b) : [];
+  const keptBx = keep ? boxes.filter(bx => bx.state !== "no") : [];
+  const kept = keptBx.map(bx => bx.b), outlines = keptBx.map(bx => bx.poly || null);
   const r = await (await fetch("/api/item/" + encodeURIComponent(it.name), {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status, boxes: kept }),
+    body: JSON.stringify({ status, boxes: kept, outlines }),
   })).json();
-  it.status = status; it.boxes = kept; counts = r.counts;
+  it.status = status; it.boxes = kept; it.outlines = outlines; counts = r.counts;
   toast(status === "skipped" ? "skipped" : `saved · ${kept.length} chicken${kept.length === 1 ? "" : "s"}`);
   const next = items.findIndex((x, j) => j > idx && x.status === "pending");
   if (next >= 0) show(next);
@@ -149,7 +204,16 @@ window.addEventListener("keydown", e => {
   if (k === "y" || k === "enter") save("done", true);
   else if (k === "n") save("done", false);
   else if (k === "s") save("skipped", false);
-  else if (k === "z") { const i = boxes.map(b => !!b.user).lastIndexOf(true); if (i >= 0) { boxes.splice(i, 1); draw(); } }
+  else if (k === "z") {
+    const i = boxes.map(b => !!b.user).lastIndexOf(true);
+    if (i >= 0) { if (lastOutline && boxes[i] === lastOutline.bx) lastOutline = null; boxes.splice(i, 1); draw(); }
+  }
+  else if (k === "o" && outlineOn) {
+    outlineMode = !outlineMode;
+    document.getElementById("omode").style.display = outlineMode ? "" : "none";
+    canvas.style.cursor = outlineMode ? "cell" : "";
+    toast(outlineMode ? "outline mode: click each hen" : "outline mode off");
+  }
   else if (k === "arrowright") show(idx + 1);
   else if (k === "arrowleft") show(idx - 1);
   else return;

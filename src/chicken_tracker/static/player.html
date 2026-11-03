@@ -65,6 +65,8 @@
   <label class="tg"><input type="checkbox" data-layer="stations" checked> Feeder &amp; water</label>
   <label class="tg"><input type="checkbox" data-layer="hidden" checked> Hidden-chicken markers</label>
   <label class="tg"><input type="checkbox" data-layer="groups" checked> "2+ chickens" boxes (unnamed groups)</label>
+  <label class="tg"><input type="checkbox" data-layer="pecks" checked> Pecks (pulse at the head)</label>
+  <label class="tg"><input type="checkbox" data-layer="skeletons"> Skeletons (beak → head → neck → back → tail)</label>
   <h2>Fastest moments</h2>
   <div id="moments"></div>
 </aside>
@@ -80,7 +82,13 @@
 const v = document.getElementById("v"), ov = document.getElementById("ov"), ctx = ov.getContext("2d");
 const tl = document.getElementById("tl"), tctx = tl.getContext("2d");
 let D = null, focus = null, frame = 0;
-const layers = { boxes: true, trails: true, stations: true, hidden: true, groups: true };
+const layers = { boxes: true, trails: true, stations: true, hidden: true, groups: true, skeletons: false, pecks: true };
+let P = null, pLoading = false;  // skeletons: loaded the first time the layer is switched on
+function loadPoses() {
+  if (P || pLoading) return; pLoading = true;
+  fetch("/poses.json").then(r => r.json()).then(d => { P = d; draw(); })
+    .catch(() => { P = { frames: {} }; });
+}
 const ST_COL = { feeder: "#ff9800", water: "#29b6f6" }, ACT = { 1: "eating", 2: "drinking" };
 const fmt = s => { s = Math.max(0, Math.floor(s)); return [s / 3600 | 0, (s % 3600) / 60 | 0, s % 60].map(x => String(x).padStart(2, "0")).join(":"); };
 
@@ -99,6 +107,7 @@ function buildPanel() {
     const stats = [s.visible_s != null && `visible ${(s.visible_s / 60).toFixed(1)} min`,
       s.distance_m != null && `walked ${Math.round(s.distance_m)} m`,
       s.feeder_time_s != null && `feeder ${(s.feeder_time_s / 60).toFixed(1)} min (${s.feeder_visits} visits)`,
+      s.pecks_at_feeder != null && `pecks: ${s.pecks_at_feeder} at feeder, ${s.pecks_ground} on the ground`,
       s.water_visits != null && `water ${s.water_visits} visits`,
       s.top_speed_m_s != null && `top speed ${s.top_speed_m_s} m/s`].filter(Boolean).join(" · ");
     return `<div class="hen" data-i="${i}"><span class="dot" style="background:${c.color}"></span>
@@ -115,7 +124,11 @@ function buildPanel() {
       ${D.chickens[m.c].name}</span><span>${m.speed} m/s · ${clockAt(m.at)}</span></div>`).join("")
     : '<span style="color:var(--muted)">none</span>';
   document.querySelectorAll(".moment").forEach(el => el.onclick = () => { seek(+el.dataset.t - 1.5); v.play(); });
-  document.querySelectorAll("input[data-layer]").forEach(cb => cb.onchange = () => { layers[cb.dataset.layer] = cb.checked; draw(); });
+  document.querySelectorAll("input[data-layer]").forEach(cb => cb.onchange = () => {
+    layers[cb.dataset.layer] = cb.checked;
+    if (cb.dataset.layer === "skeletons" && cb.checked) loadPoses();
+    draw();
+  });
   document.getElementById("speeds").innerHTML = [0.5, 1, 2, 4, 8].map(r =>
     `<button data-r="${r}" class="${r === 1 ? "on" : ""}">${r}×</button>`).join(" ");
   document.querySelectorAll("#speeds button").forEach(b => b.onclick = () => {
@@ -210,6 +223,36 @@ function draw() {
     ctx.globalAlpha = alpha(o.c); ctx.strokeStyle = c.color; ctx.lineWidth = focus === o.c ? lw * 1.8 : lw; ctx.setLineDash([]);
     ctx.strokeRect(x1, y1, x2 - x1, y2 - y1); ctx.globalAlpha = 1;
     label(c.name + (o.st ? ` (${ACT[o.st]})` : ""), x1, y1 - 5, c.color, alpha(o.c));
+  }
+  const sk = layers.skeletons && P && P.frames[frame];
+  if (sk) {
+    const K = P.keypoints.length, n = 1 + 3 * K, r = 3 * devicePixelRatio;
+    for (let k = 0; k < sk.length; k += n) {
+      const ci = sk[k], c = D.chickens[ci], pts = [];
+      for (let j = 0; j < K; j++) pts.push([sk[k + 1 + 3 * j] * s, sk[k + 2 + 3 * j] * s, sk[k + 3 + 3 * j]]);
+      ctx.globalAlpha = alpha(ci);
+      ctx.lineWidth = lw * 1.4; ctx.strokeStyle = "rgba(0,0,0,.7)";   // dark under-stroke so it shows on white hens
+      for (const [a, b] of P.skeleton) if (pts[a][2] && pts[b][2]) { ctx.beginPath(); ctx.moveTo(pts[a][0], pts[a][1]); ctx.lineTo(pts[b][0], pts[b][1]); ctx.stroke(); }
+      ctx.lineWidth = lw * 0.8; ctx.strokeStyle = c.color;
+      for (const [a, b] of P.skeleton) if (pts[a][2] && pts[b][2]) { ctx.beginPath(); ctx.moveTo(pts[a][0], pts[a][1]); ctx.lineTo(pts[b][0], pts[b][1]); ctx.stroke(); }
+      pts.forEach(([x, y, seen], j) => {
+        if (!seen) return;
+        ctx.beginPath(); ctx.arc(x, y, j === 0 ? r * 1.3 : r, 0, 7);
+        ctx.fillStyle = j === 0 ? "#ff5252" : c.color; ctx.fill();   // beak in red: shows which way she faces
+        ctx.lineWidth = 1; ctx.strokeStyle = "#000"; ctx.stroke();
+      });
+      ctx.globalAlpha = 1;
+    }
+  }
+  if (layers.pecks && D.pecks) for (let back = 0; back < 5; back++) {   // a ring that grows and fades over ~0.3 s
+    const pk = D.pecks[frame - back];
+    if (!pk) continue;
+    for (let k = 0; k < pk.length; k += 3) {
+      const c = D.chickens[pk[k]];
+      ctx.globalAlpha = alpha(pk[k]) * (1 - back / 5); ctx.strokeStyle = "#fff"; ctx.lineWidth = lw;
+      ctx.beginPath(); ctx.arc(pk[k + 1] * s, pk[k + 2] * s, (4 + back * 3) * devicePixelRatio, 0, 7); ctx.stroke();
+      ctx.strokeStyle = c.color; ctx.lineWidth = lw * 0.6; ctx.stroke(); ctx.globalAlpha = 1;
+    }
   }
   for (const h of D.hidden) {
     if (t < h.from || t > h.to || visible.has(h.c)) continue;

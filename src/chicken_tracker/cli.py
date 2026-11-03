@@ -78,6 +78,14 @@ def cmd_snapshot(a: argparse.Namespace) -> None:
 def cmd_mine(a: argparse.Namespace) -> None:
     from .labeling import mine
 
+    if a.crowded:
+        from .labeling import mine_crowded
+
+        stats = mine_crowded(a.crowded, a.dataset, model=a.model if a.model != "yoloe-11l-seg.pt" else
+                             "dataset/runs/chicken/weights/best.pt", n=a.max_frames, device=a.device,
+                             video=str(a.video) if a.video else None)
+        print(f"\n{stats}\nNext: chicken-tracker review {a.dataset}  (crowded frames come first)")
+        return
     if a.objects:
         from .labeling import mine_objects
 
@@ -95,13 +103,19 @@ def cmd_mine(a: argparse.Namespace) -> None:
 def cmd_review(a: argparse.Namespace) -> None:
     from .review_server import serve
 
-    serve(a.dataset, port=a.port, open_browser=not a.no_browser, objects=a.objects)
+    serve(a.dataset, port=a.port, open_browser=not a.no_browser, objects=a.objects,
+          outline=not a.no_outline, device=a.device, pose=a.pose)
 
 
 def cmd_train(a: argparse.Namespace) -> None:
-    from .labeling import train
+    from .labeling import train, train_pose
 
-    train(a.dataset, model=a.model, epochs=a.epochs, imgsz=a.imgsz, batch=a.batch, device=a.device)
+    if a.pose:
+        train_pose(a.dataset, epochs=a.epochs, imgsz=a.imgsz, batch=a.batch, device=a.device)
+        return
+
+    train(a.dataset, model=a.model, epochs=a.epochs, imgsz=a.imgsz, batch=a.batch, device=a.device,
+          with_objects=a.with_objects, name=a.name)
 
 
 def cmd_identify(a: argparse.Namespace) -> None:
@@ -131,6 +145,19 @@ def cmd_recognizer(a: argparse.Namespace) -> None:
     r = evaluate(a.out, weights, device=a.device)
     print(f"\nHeld-back pieces: crops {r['crop_acc']:.1%}, pieces {r['piece_acc']:.1%}\n{r['confusion']}")
     print(f"Weights: {weights}")
+
+
+def cmd_pose(a: argparse.Namespace) -> None:
+    from .pose import run_pose
+
+    run_pose(a.run_dir, a.model, video=str(a.video) if a.video else None, device=a.device, conf=a.conf)
+    print("Switch on \"Skeletons\" in the player (chicken-tracker player RUN_DIR).")
+
+
+def cmd_pecks(a: argparse.Namespace) -> None:
+    from .behaviour import write_pecking
+
+    print(write_pecking(a.run_dir, video=str(a.video) if a.video else None))
 
 
 def cmd_preview(a: argparse.Namespace) -> None:
@@ -222,6 +249,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("-d", "--dataset", type=Path, default=Path("dataset"))
     p.add_argument("--objects", action="store_true",
                    help="add feeder/water suggestions to frames already in the dataset (no videos needed)")
+    p.add_argument("--crowded", type=Path, metavar="RUN_DIR",
+                   help="add frames where hens bunch up in this analysed run (merged '2+' boxes)")
+    p.add_argument("--video", type=Path, help="with --crowded: source video, if it moved")
     p.add_argument("--model", default="yoloe-11l-seg.pt",
                    help="proposal model: open-vocabulary (yoloe/world) or your trained best.pt")
     p.add_argument("--prompt", nargs="+", default=["chicken"], help="text prompt(s) for open-vocab models")
@@ -237,6 +267,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--no-browser", action="store_true")
     p.add_argument("--objects", action="store_true", help="review feeder/water boxes instead of chickens")
+    p.add_argument("--no-outline", action="store_true", help="turn off click-to-outline (SAM)")
+    p.add_argument("--pose", action="store_true", help="label chicken skeletons (beak, head, neck, back, tail)")
+    p.add_argument("--device", help="for click-to-outline: cpu, mps, 0, ...")
     p.set_defaults(func=cmd_review)
 
     p = sub.add_parser("train", help="train a chicken detector on the reviewed frames")
@@ -246,6 +279,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--imgsz", type=int, default=1280)
     p.add_argument("--batch", type=int, default=8)
     p.add_argument("--device", help="cpu, mps, 0, ...")
+    p.add_argument("--name", default="chicken", help="run name: weights go to <dataset>/runs/<name>/")
+    p.add_argument("--pose", action="store_true", help="train the chicken skeleton model instead")
+    p.add_argument("--with-objects", action="store_true",
+                   help="also learn feeder/water (needs the objects pass on most frames)")
     p.set_defaults(func=cmd_train)
 
     p = sub.add_parser("identify", help="group track pieces into named chickens (opens naming page)")
@@ -270,6 +307,19 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--folds", type=int, default=4)
     p.add_argument("--device", help="cpu, mps, 0, ...")
     p.set_defaults(func=cmd_recognizer)
+
+    p = sub.add_parser("pose", help="chicken skeletons over the whole video, for the player overlay")
+    p.add_argument("run_dir", type=Path)
+    p.add_argument("--model", type=Path, default=Path("dataset/runs/pose/weights/best.pt"))
+    p.add_argument("--video", type=Path, help="source video, if it moved since `process`")
+    p.add_argument("--conf", type=float, default=0.25)
+    p.add_argument("--device", help="cpu, mps, 0, ...")
+    p.set_defaults(func=cmd_pose)
+
+    p = sub.add_parser("pecks", help="count pecks per hen (head moves, body still) - needs `pose` first")
+    p.add_argument("run_dir", type=Path)
+    p.add_argument("--video", type=Path, help="source video, if it moved since `process`")
+    p.set_defaults(func=cmd_pecks)
 
     p = sub.add_parser("stations", help="feeder/water positions from labelled boxes + per-chicken visits")
     p.add_argument("run_dir", type=Path)
