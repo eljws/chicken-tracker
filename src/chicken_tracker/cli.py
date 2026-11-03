@@ -1,4 +1,4 @@
-"""Command-line interface: ``chicken-tracker {process,analyze,snapshot,mine,review,train,identify,preview,stations,player}``."""
+"""Command-line interface: ``chicken-tracker {process,analyze,snapshot,mine,review,train,identify,recognizer,preview,stations,player}``."""
 
 from __future__ import annotations
 
@@ -114,6 +114,18 @@ def cmd_identify(a: argparse.Namespace) -> None:
         identity.export(a.run_dir)
     if not a.build_only:
         serve(a.run_dir, port=a.port, open_browser=not a.no_browser)
+
+
+def cmd_recognizer(a: argparse.Namespace) -> None:
+    from .recognizer import build_id_dataset, evaluate, train_recognizer
+
+    if not a.skip_build:
+        info = build_id_dataset(a.run_dir, a.out, video=str(a.video) if a.video else None)
+        print(f"{info['crops']} crops\n{info['counts']}")
+    weights = train_recognizer(a.out, epochs=a.epochs, device=a.device)
+    r = evaluate(a.out, weights, device=a.device)
+    print(f"\nHeld-back pieces: crops {r['crop_acc']:.1%}, pieces {r['piece_acc']:.1%}\n{r['confusion']}")
+    print(f"Weights: {weights}")
 
 
 def cmd_preview(a: argparse.Namespace) -> None:
@@ -241,6 +253,15 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--no-browser", action="store_true")
     p.add_argument("--device", help="cpu, mps, 0, ...")
     p.set_defaults(func=cmd_identify)
+
+    p = sub.add_parser("recognizer", help="train a model on your named hens (crop -> which hen)")
+    p.add_argument("run_dir", type=Path)
+    p.add_argument("--out", type=Path, default=Path("dataset_id"))
+    p.add_argument("--video", type=Path, help="source video, if it moved since `process`")
+    p.add_argument("--epochs", type=int, default=40)
+    p.add_argument("--skip-build", action="store_true", help="reuse the existing crop set")
+    p.add_argument("--device", help="cpu, mps, 0, ...")
+    p.set_defaults(func=cmd_recognizer)
 
     p = sub.add_parser("stations", help="feeder/water positions from labelled boxes + per-chicken visits")
     p.add_argument("run_dir", type=Path)

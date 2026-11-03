@@ -11,3 +11,5 @@ dataset/
 weights/
 mobileclip*.ts
 .DS_Store
+dataset_id/
+recognizer_runs/
