@@ -184,9 +184,9 @@ def cmd_clean(a: argparse.Namespace) -> None:
 
 
 def cmd_dashboard(a: argparse.Namespace) -> None:
-    from .dashboard import serve
+    from .hub import serve
 
-    serve(a.out, port=a.port, open_browser=not a.no_browser)
+    serve(a.out, dataset=a.dataset, port=a.port, open_browser=not a.no_browser, device=a.device)
 
 
 def cmd_preview(a: argparse.Namespace) -> None:
@@ -367,11 +367,15 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--video", type=Path, help="source video, if it moved since `process`")
     p.set_defaults(func=cmd_pecks)
 
-    p = sub.add_parser("dashboard", help="web page: progress of every analysed clip, live")
-    p.add_argument("-o", "--out", type=Path, default=Path("output"))
-    p.add_argument("--port", type=int, default=8760)
-    p.add_argument("--no-browser", action="store_true")
-    p.set_defaults(func=cmd_dashboard)
+    for name in ("home", "dashboard"):  # one server for everything: calendar, players, naming, labelling
+        p = sub.add_parser(name, help="web page for everything: calendar of days, each clip's player and "
+                                      "naming, progress, frame and skeleton labelling")
+        p.add_argument("-o", "--out", type=Path, default=Path("output"))
+        p.add_argument("-d", "--dataset", type=Path, default=Path("dataset"), help="for the labelling pages")
+        p.add_argument("--port", type=int, default=8760)
+        p.add_argument("--device", help="for click-to-outline on the labelling page: cpu, mps, 0, ...")
+        p.add_argument("--no-browser", action="store_true")
+        p.set_defaults(func=cmd_dashboard)
 
     p = sub.add_parser("stations", help="feeder/water positions from labelled boxes + per-chicken visits")
     p.add_argument("run_dir", type=Path)

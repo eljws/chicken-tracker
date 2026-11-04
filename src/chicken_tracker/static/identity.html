@@ -70,7 +70,7 @@
 let S = null, tab = "name", sel = null;
 const $ = s => document.querySelector(s);
 const label = c => c.name || `Chicken ${c.id + 1}`;
-const img = n => `/crop/${encodeURIComponent(n)}`;
+const img = n => `crop/${encodeURIComponent(n)}`;
 
 async function api(path, body) {
   const r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" },
@@ -84,7 +84,7 @@ const clockOf = s => { const t = Math.round(s); return `${String(Math.floor(t / 
 function film(p, h = 120, cuttable = true) {
   return `<div class="film">${p.strip.map((f, i) =>
     (i ? (cuttable ? `<span class="cut" data-t="${p.track}" data-f="${f}" title="cut piece here">✂</span>` : '<span class="gap"></span>') : "") +
-    `<img src="/strip/${p.track}/${f}.jpg?v=${S.version}" style="height:${h}px">`).join("")}</div>`;
+    `<img src="strip/${p.track}/${f}.jpg?v=${S.version}" style="height:${h}px">`).join("")}</div>`;
 }
 function bindCuts(root = document) {
   root.querySelectorAll(".cut").forEach(c => c.onclick = async () => {
@@ -93,7 +93,7 @@ function bindCuts(root = document) {
                  `so you can label the two halves separately.`)) return;
     toast("Cutting… (extracting new pictures)");
     sel = null;
-    await api("/api/split", { track: t, frame: f });
+    await api("api/split", { track: t, frame: f });
     toast("Cut ✂ — label each half");
   });
 }
@@ -123,7 +123,9 @@ function renderName() {
     S.chickens.map(c => `
     <div class="card"><h3>
       <input data-id="${c.id}" class="${c.name ? "" : "unnamed"}" value="${esc(c.name)}" placeholder="Chicken ${c.id + 1} — type name">
-      <span class="meta">${c.fragments.length} pieces · ${c.minutes} min seen</span>
+      ${c.fragments.some(f => !f.sure) ? `<button class="act yes" data-all="${c.id}"
+         title="Every picture in this row is ${esc(label(c))}: confirm the ones not yet confirmed">✓ all match</button>` : ""}
+      <span class="meta">${c.fragments.length} pieces · ${c.fragments.filter(f => f.sure).length} confirmed · ${c.minutes} min seen</span>
       <span style="margin-left:auto" class="meta">same bird as</span>
       <select data-merge="${c.id}"><option value="">—</option>${opts.replace(`value="${c.id}"`, `value="${c.id}" disabled`)}</select>
     </h3>
@@ -138,13 +140,17 @@ function renderName() {
        class="${sel && sel.track === f.track ? "sel" : ""}" title="piece #${f.track}">`).join("") ||
        '<span class="meta">none yet</span>'}</div></div>`).join("");
   document.querySelectorAll(".card input").forEach(i => {
-    i.addEventListener("change", () => api("/api/name", { chicken: +i.dataset.id, name: i.value }));
+    i.addEventListener("change", () => api("api/name", { chicken: +i.dataset.id, name: i.value }));
     i.addEventListener("keydown", e => { if (e.key === "Enter") i.blur(); });
   });
+  document.querySelectorAll("button[data-all]").forEach(b => b.addEventListener("click", () => {
+    const c = S.chickens.find(c => c.id === +b.dataset.all), n = c.fragments.filter(f => !f.sure).length;
+    if (confirm(`All ${n} unconfirmed pictures in this row are ${label(c)}?`)) api("api/confirm_all", { chicken: c.id });
+  }));
   document.querySelectorAll("select[data-merge]").forEach(s => s.addEventListener("change", () => {
     if (!s.value) return;
     const src = S.chickens.find(c => c.id === +s.dataset.merge), dst = S.chickens.find(c => c.id === +s.value);
-    if (confirm(`Merge "${label(src)}" into "${label(dst)}"?`)) api("/api/merge", { src: src.id, dst: dst.id });
+    if (confirm(`Merge "${label(src)}" into "${label(dst)}"?`)) api("api/merge", { src: src.id, dst: dst.id });
     else s.value = "";
   }));
   document.querySelectorAll(".strip img").forEach(im => im.addEventListener("click", () => {
@@ -171,14 +177,14 @@ function showPanel() {
       ${sel.aside !== "not_chicken" ? '<button class="act no" data-v="not_chicken">not a chicken</button>' : ""}
       <button class="act" data-v="close">close</button></div>
     <div id="pfilm"><div class="meta">loading filmstrip…</div></div>`;
-  fetch(`/api/piece/${sel.track}`).then(r => r.json()).then(pc => {
+  fetch(`api/piece/${sel.track}`).then(r => r.json()).then(pc => {
     const box = p.querySelector("#pfilm");
     if (box && pc.strip) { box.innerHTML = `<div class="meta">whole piece (${pc.duration_s}s), ✂ to cut:</div>` + film(pc, 70); bindCuts(box); }
   });
   p.querySelectorAll("button").forEach(b => b.addEventListener("click", async () => {
     if (b.dataset.v === "close") { sel = null; return render(); }
     const t = sel.track; sel = null;
-    await api("/api/answer", { track: t, chicken: b.dataset.c ? +b.dataset.c : null, verdict: b.dataset.v });
+    await api("api/answer", { track: t, chicken: b.dataset.c ? +b.dataset.c : null, verdict: b.dataset.v });
   }));
 }
 
@@ -210,7 +216,7 @@ function renderAsk() {
       <div><h2 style="color:#aaa">${esc(q.name)} looks like:</h2><div class="meta">&nbsp;</div>
         <div class="grid" style="margin-top:62px">${q.ref_crops.map(c => `<img src="${img(c)}">`).join("")}</div></div>
     </div>`;
-  const ans = (verdict, chicken) => api("/api/answer", { track: q.track, chicken, verdict });
+  const ans = (verdict, chicken) => api("api/answer", { track: q.track, chicken, verdict });
   $("#y").onclick = () => ans("yes", q.chicken);
   $("#p").onclick = () => ans("partial", q.chicken);
   $("#l").onclick = () => ans("loose", q.chicken);
@@ -244,7 +250,7 @@ function renderConflicts() {
       neighbour, mark it <b>◑ box too big</b>. Either way it's one bird boxed twice, not a conflict.</div>
     <div class="card"><h3>Same moment, same camera frame <span class="meta">— start, middle and end of the overlap</span></h3>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">${[0, 1, 2].map(k =>
-        `<img src="/snap/${q.a}/${q.b}/${k}.jpg" style="width:100%;border-radius:6px;background:#000;min-height:120px">`).join("")}</div>
+        `<img src="snap/${q.a}/${q.b}/${k}.jpg" style="width:100%;border-radius:6px;background:#000;min-height:120px">`).join("")}</div>
     </div>
     <div>${q.pieces.map((p, i) => `
       <div class="card" style="border-color:${i ? "#ffdc00" : "#00dcff"}"><h3>
@@ -263,10 +269,10 @@ function renderConflicts() {
           <button class="act no" data-t="${p.track}" data-v="not_chicken">not a chicken</button>
         </div></div>`).join("")}</div>`;
   document.querySelectorAll("#main button[data-t]").forEach(b => b.onclick = () =>
-    api("/api/answer", { track: +b.dataset.t, chicken: b.dataset.c ? +b.dataset.c : null, verdict: b.dataset.v }));
+    api("api/answer", { track: +b.dataset.t, chicken: b.dataset.c ? +b.dataset.c : null, verdict: b.dataset.v }));
   document.querySelectorAll("#main button[data-iso]").forEach(b => b.onclick = async () => {
     toast("Cutting out the overlap…");
-    await api("/api/isolate", { track: +b.dataset.iso, other: +b.dataset.other });
+    await api("api/isolate", { track: +b.dataset.iso, other: +b.dataset.other });
     toast("Done ✂ — now label the overlapping bit");
   });
   bindCuts();
@@ -280,7 +286,7 @@ async function renderChecks() {
     two-bird box, no piece that changes look part-way.</div></div>`; return; }
   let c = S.check;
   if (selCheck && selCheck !== c.key) {
-    const r = await (await fetch("/api/check/" + encodeURIComponent(selCheck))).json();
+    const r = await (await fetch("api/check/" + encodeURIComponent(selCheck))).json();
     if (!r.error) c = r; else selCheck = null;
   }
   const KIND = { aside_single: "Set aside, but one bird", merged_inside: "Two birds in a named box", swap: "Possible bird swap", recognizer: "Recogniser disagrees", stretch: "Part of the piece is another bird" };
@@ -291,7 +297,7 @@ async function renderChecks() {
     <div class="card"><h3><span style="color:#ffb74d">${KIND[c.kind]}</span>
       <span class="meta">${c.seconds}s affected</span></h3>
       <div style="font-size:16px;margin:4px 0 10px">${esc(c.title)}</div>
-      <div class="film">${c.strip.map((f, i) => `<img src="/strip/${c.track}/${f}.jpg?v=${S.version}"
+      <div class="film">${c.strip.map((f, i) => `<img src="strip/${c.track}/${f}.jpg?v=${S.version}"
          style="height:110px;margin:2px;border:3px solid ${c.in_range[i] ? "#ffb74d" : "transparent"}">`).join("")}</div>
       <div class="answers">
         <button class="act yes" id="kapply">✓ Apply fix: ${esc(c.fix)}</button>
@@ -303,8 +309,8 @@ async function renderChecks() {
         border-radius:6px;${x.key === c.key ? "background:#2a2a2a" : ""}"><span class="meta" style="width:60px">${x.seconds}s</span>
         <span>${esc(x.title)}</span></div>`).join("")}</div>`;
   $("#kapply").onclick = async () => { toast("Applying… (cutting, new pictures)"); selCheck = null;
-    await api("/api/apply_check", { key: c.key }); toast("Fixed ✓"); };
-  $("#kok").onclick = () => { selCheck = null; api("/api/dismiss_check", { key: c.key }); };
+    await api("api/apply_check", { key: c.key }); toast("Fixed ✓"); };
+  $("#kok").onclick = () => { selCheck = null; api("api/dismiss_check", { key: c.key }); };
   $("#kskip").onclick = () => { const i = S.check_list.findIndex(x => x.key === c.key);
     selCheck = (S.check_list[i + 1] || S.check_list[0]).key; renderChecks(); };
   document.querySelectorAll(".moment[data-k]").forEach(el => el.onclick = () => { selCheck = el.dataset.k; renderChecks(); });
@@ -318,17 +324,17 @@ document.querySelectorAll(".tab").forEach(b => b.onclick = () => { tab = b.datas
 async function undo() {
   if (!S.undo.count) return toast("Nothing to undo");
   sel = null;
-  await api("/api/undo", {});
+  await api("api/undo", {});
   if (S.undone) toast(`Undone: ${S.undone}`);
 }
 $("#undo").onclick = undo;
 window.addEventListener("keydown", e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z" && e.target.tagName !== "INPUT") { e.preventDefault(); undo(); }
 });
-$("#resort").onclick = async () => { $("#resort").disabled = true; await api("/api/resort", {}); $("#resort").disabled = false;
+$("#resort").onclick = async () => { $("#resort").disabled = true; await api("api/resort", {}); $("#resort").disabled = false;
                                      toast("Re-sorted"); };
 const esc = s => String(s).replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch]);
-api("/api/state");
+api("api/state");
 </script>
 </body>
 </html>

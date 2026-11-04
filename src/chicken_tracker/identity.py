@@ -761,6 +761,17 @@ def apply_answer(data: dict, track: int, chicken: int | None, verdict: str) -> N
     data["chickens"] = [c for c in data["chickens"] if c["tracks"] or c["name"]]
 
 
+def confirm_all(data: dict, chicken: int) -> int:
+    """You've looked at a chicken's row and every piece in it is her: confirm the ones not yet
+    confirmed (set-aside pieces aren't in the row, so they're untouched). Returns how many."""
+    c = next(c for c in data["chickens"] if c["id"] == chicken)
+    sure = confirmed(data)
+    todo = [t for t in c["tracks"] if t not in sure]
+    for t in todo:
+        apply_answer(data, t, chicken, "yes")
+    return len(todo)
+
+
 # ------------------------------------------------------------------------- export
 
 def export(run_dir: Path, max_hidden_s: float = 120.0, hidden_tau_s: float = 20.0) -> dict:

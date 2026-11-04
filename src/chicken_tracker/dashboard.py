@@ -64,7 +64,7 @@ def run_status(root: Path, run: Path) -> dict:
         rec["key"] = key
         pic = run / "preview" / f"{key}.jpg"
         if pic.exists():  # mtime in the URL: the browser fetches a fresh picture only when it changed
-            rec["picture"] = f"/preview/{rel}/preview/{key}.jpg?v={int(pic.stat().st_mtime * 1000)}"
+            rec["picture"] = f"preview/{rel}/preview/{key}.jpg?v={int(pic.stat().st_mtime * 1000)}"
         steps.append(rec)
     hens = []
     if (run / "chickens.csv").exists():
@@ -80,7 +80,7 @@ def run_status(root: Path, run: Path) -> dict:
             "minutes": round(meta["video"]["frame_count"] / meta["video"]["fps"] / 60, 1) if meta else None}
 
 
-def serve(root: Path = Path("output"), port: int = 8760, open_browser: bool = True) -> None:
+def make_handler(root: Path):
     root = Path(root)
     page = lambda: (resources.files("chicken_tracker") / "static" / "dashboard.html").read_bytes()  # fresh each load
 
@@ -113,7 +113,12 @@ def serve(root: Path = Path("output"), port: int = 8760, open_browser: bool = Tr
                 return self._send(json.dumps({"runs": runs, "now": time.time()}).encode(), "application/json")
             self._send(b'{"error":"not found"}', "application/json", 404)
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    return Handler
+
+
+def serve(root: Path = Path("output"), port: int = 8760, open_browser: bool = True) -> None:
+    root = Path(root)
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(root))
     url = f"http://127.0.0.1:{port}/"
     print(f"Progress dashboard for {root}/ at {url}  - Ctrl+C to stop")
     if open_browser:

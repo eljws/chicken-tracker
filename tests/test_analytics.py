@@ -479,3 +479,38 @@ def test_track_video_without_skip_empty(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "ultralytics", types.SimpleNamespace(YOLO=Fake))
     det, info = track_video(vid, TrackConfig(model="x.pt", classes=None), progress=False)
     assert len(det) == 5 and set(det.track_id) == {7}
+
+
+def test_home_server_routes_to_each_page(tmp_path):
+    import json, threading, urllib.request, urllib.error
+    from http.server import ThreadingHTTPServer
+    from chicken_tracker.hub import make_handler
+    run = tmp_path / "out" / "2026-11-02" / "143113-150338_ch04"
+    (run / "identity" / "clips").mkdir(parents=True)
+    (run / "meta.json").write_text(json.dumps({"video": {"path": "x.mp4", "fps": 10, "frame_count": 600}}))
+    (run / "identity" / "clips" / "index.html").write_text("<p>clips</p>")
+    (run / "identity" / "clips" / "piece_1.mp4").write_bytes(bytes(range(100)))
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path / "out"))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    get = lambda p, **h: urllib.request.urlopen(urllib.request.Request(base + p, headers=h))
+    try:
+        assert b"Chicken tracker" in get("/").read()
+        home = json.loads(get("/api/home").read())
+        r = home["runs"][0]
+        assert r["date"] == "2026-11-02" and r["from"] == "14:31"
+        assert r["links"]["clips"] == "run/2026-11-02/143113-150338_ch04/clips/"
+        assert r["links"]["player"] is None and r["links"]["naming"] is None
+        # the progress page's own API, through the prefix
+        assert json.loads(get("/progress/api/runs").read())["runs"][0]["run"] == "2026-11-02/143113-150338_ch04"
+        assert get("/run/2026-11-02/143113-150338_ch04/clips/").read() == b"<p>clips</p>"
+        part = get("/run/2026-11-02/143113-150338_ch04/clips/piece_1.mp4", Range="bytes=10-19")
+        assert part.status == 206 and part.read() == bytes(range(10, 20))
+        for bad in ("/run/2026-11-02/143113-150338_ch04/clips/../../meta.json", "/run/nope/player/",
+                    "/run/2026-11-02/143113-150338_ch04/naming/"):
+            try:
+                get(bad); assert False, bad
+            except urllib.error.HTTPError as e:
+                assert e.code == 404
+    finally:
+        srv.shutdown()

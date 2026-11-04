@@ -52,7 +52,7 @@
 <div id="stage">
   <span id="loading">Loading…</span>
   <div id="wrap">
-    <video id="v" src="/video.mp4" preload="auto" muted playsinline></video>
+    <video id="v" src="video.mp4" preload="auto" muted playsinline></video>
     <canvas id="ov"></canvas>
   </div>
 </div>
@@ -86,13 +86,13 @@ const layers = { boxes: true, trails: true, stations: true, hidden: true, groups
 let P = null, pLoading = false;  // skeletons: loaded the first time the layer is switched on
 function loadPoses() {
   if (P || pLoading) return; pLoading = true;
-  fetch("/poses.json").then(r => r.json()).then(d => { P = d; draw(); })
+  fetch("poses.json").then(r => r.json()).then(d => { P = d; draw(); })
     .catch(() => { P = { frames: {} }; });
 }
 const ST_COL = { feeder: "#ff9800", water: "#29b6f6" }, ACT = { 1: "eating", 2: "drinking" };
 const fmt = s => { s = Math.max(0, Math.floor(s)); return [s / 3600 | 0, (s % 3600) / 60 | 0, s % 60].map(x => String(x).padStart(2, "0")).join(":"); };
 
-fetch("/overlay.json").then(r => r.json()).then(d => {
+fetch("overlay.json").then(r => r.json()).then(d => {
   D = d;
   document.getElementById("info").textContent =
     `${d.chickens.length} chickens · ${d.width}×${d.height} analysed · ${d.fps.toFixed(2)} fps`;

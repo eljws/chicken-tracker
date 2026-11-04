@@ -372,3 +372,13 @@ def test_clean_ghost_boxes_keeps_naming(tmp_path, monkeypatch):
     assert set(pd.read_csv(tmp_path / "detections.csv").track_id) == {1, 2}
     assert len(pd.read_csv(tmp_path / "detections_unfiltered.csv")) == 9
     assert list(pd.read_csv(tmp_path / "pecks.csv").chicken) == ["Salt"]
+
+
+def test_confirm_all_confirms_only_the_rest_of_the_row():
+    from chicken_tracker import identity as I
+    data = {"answers": [{"track": 1, "chicken": 0, "verdict": "yes"}],
+            "chickens": [{"id": 0, "name": "Salt", "tracks": [1, 2, 3]}, {"id": 1, "name": "Rocky", "tracks": [4]}]}
+    assert I.confirm_all(data, 0) == 2
+    assert I.confirmed(data) == {1, 2, 3}
+    assert data["chickens"][0]["tracks"] == [1, 2, 3] and data["chickens"][1]["tracks"] == [4]
+    assert I.confirm_all(data, 0) == 0

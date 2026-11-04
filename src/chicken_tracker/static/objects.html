@@ -52,7 +52,7 @@ function setDrawCls(c) {
 }
 
 async function load() {
-  const r = await (await fetch("/api/items")).json();
+  const r = await (await fetch("api/items")).json();
   items = r.items; counts = r.counts;
   const first = items.findIndex(it => it.obj_status === "pending");
   show(first >= 0 ? first : 0);
@@ -89,7 +89,7 @@ function show(i) {
   }
   img = new Image();
   img.onload = () => { canvas.width = img.naturalWidth; canvas.height = img.naturalHeight; draw(); };
-  img.src = "/img/" + encodeURIComponent(it.name);
+  img.src = "img/" + encodeURIComponent(it.name);
   const done = counts.done + counts.skipped, total = items.length;
   document.getElementById("prog").textContent = `${done} / ${total} reviewed · frame ${idx + 1}`;
   document.querySelector("#bar div").style.width = (100 * done / total) + "%";
@@ -168,7 +168,7 @@ async function save(status, keep) {
   const kept = keep ? boxes.filter(bx => bx.state !== "no").map(bx => [...bx.b, bx.cls]) : [];
   // suggestions turned down (all of them on N) are remembered as "not a feeder/water here"
   const rejected = status === "done" ? boxes.filter(bx => !bx.user && (!keep || bx.state === "no")).map(bx => bx.b) : [];
-  const r = await (await fetch("/api/item/" + encodeURIComponent(it.name), {
+  const r = await (await fetch("api/item/" + encodeURIComponent(it.name), {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status, objects: kept, rejected }),
   })).json();

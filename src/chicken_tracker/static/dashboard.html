@@ -104,7 +104,7 @@ function updatePics(box, r) {
 
 async function refresh() {
   let d;
-  try { d = await (await fetch("/api/runs")).json(); } catch (e) { document.getElementById("sub").textContent = "dashboard server not reachable"; return; }
+  try { d = await (await fetch("api/runs")).json(); } catch (e) { document.getElementById("sub").textContent = "dashboard server not reachable"; return; }
   const running = d.runs.filter(r => r.steps.some(s => s.state === "running")).length;
   document.getElementById("sub").textContent =
     `${d.runs.length} clip${d.runs.length === 1 ? "" : "s"} · ${running ? running + " working now" : "nothing running"} · updates every 2 s`;
