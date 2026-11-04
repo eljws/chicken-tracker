@@ -59,9 +59,9 @@ let KP = [], SK = [], items = [], idx = 0, counts = {}, img = new Image();
 let hen = 0, poses = [], view = null;
 
 async function load() {
-  const cfg = await (await fetch("/api/config")).json();
+  const cfg = await (await fetch("api/config")).json();
   KP = cfg.keypoints; SK = cfg.skeleton;
-  const r = await (await fetch("/api/items")).json();
+  const r = await (await fetch("api/items")).json();
   items = r.items; counts = r.counts;
   const first = items.findIndex(it => it.pose_status === "pending");
   show(first >= 0 ? first : 0);
@@ -75,7 +75,7 @@ function show(i) {
   if (hen < 0) hen = 0;
   img = new Image();
   img.onload = () => { over.width = img.naturalWidth; over.height = img.naturalHeight; frameView(); draw(); };
-  img.src = "/img/" + encodeURIComponent(it.name);
+  img.src = "img/" + encodeURIComponent(it.name);
   const done = (counts.done || 0) + (counts.skipped || 0), total = items.length;
   document.getElementById("prog").textContent = `${done} / ${total} frames · frame ${idx + 1}`;
   document.querySelector("#bar div").style.width = (100 * done / total) + "%";
@@ -185,7 +185,7 @@ over.addEventListener("click", e => {  // pick a hen in the overview
 async function save(status) {
   const it = items[idx];
   const out = status === "done" ? poses.map(p => (p && p.length === KP.length) ? p : null) : [];
-  const r = await (await fetch("/api/item/" + encodeURIComponent(it.name), {
+  const r = await (await fetch("api/item/" + encodeURIComponent(it.name), {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status, poses: out }),
   })).json();
   it.pose_status = status; it.poses = out; counts = r.counts;

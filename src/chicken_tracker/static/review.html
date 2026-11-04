@@ -60,9 +60,9 @@ function updateHover(shift, alt) {
 }
 
 async function load() {
-  try { outlineOn = (await (await fetch("/api/config")).json()).outline; } catch (e) { outlineOn = false; }
+  try { outlineOn = (await (await fetch("api/config")).json()).outline; } catch (e) { outlineOn = false; }
   if (!outlineOn) document.getElementById("okeys").style.display = "none";
-  const r = await (await fetch("/api/items")).json();
+  const r = await (await fetch("api/items")).json();
   items = r.items; counts = r.counts;
   const first = items.findIndex(it => it.status === "pending");
   show(first >= 0 ? first : 0);
@@ -84,7 +84,7 @@ function show(i) {
   lastOutline = null; undo = []; hover = null;
   img = new Image();
   img.onload = () => { canvas.width = img.naturalWidth; canvas.height = img.naturalHeight; draw(); };
-  img.src = "/img/" + encodeURIComponent(it.name);
+  img.src = "img/" + encodeURIComponent(it.name);
   const done = counts.done + counts.skipped, total = items.length;
   document.getElementById("prog").textContent = `${done} / ${total} reviewed · frame ${idx + 1}`;
   document.querySelector("#bar div").style.width = (100 * done / total) + "%";
@@ -99,7 +99,7 @@ function show(i) {
 const autoReq = {};
 function fetchAuto(name, bxs) {
   const k = name + JSON.stringify(bxs);
-  if (!autoReq[k]) autoReq[k] = fetch("/api/auto/" + encodeURIComponent(name), {
+  if (!autoReq[k]) autoReq[k] = fetch("api/auto/" + encodeURIComponent(name), {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ boxes: bxs }) })
     .then(r => r.ok ? r.json() : { outlines: [] }).catch(() => { delete autoReq[k]; return { outlines: [] }; });
   return autoReq[k];
@@ -235,7 +235,7 @@ async function outlineAt(x, y, trim) {
   busy = true; canvas.style.cursor = "progress";
   const slow = setTimeout(() => toast("outlining… (first one loads the model)"), 400);
   try {
-    const r = await fetch("/api/outline/" + encodeURIComponent(items[idx].name), {
+    const r = await fetch("api/outline/" + encodeURIComponent(items[idx].name), {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ points: pts, labels: lbls }) });
     const out = await r.json();
     if (!r.ok) { toast(out.error || "couldn't outline there"); return; }
@@ -262,7 +262,7 @@ async function saveNow(status, keep) {
   if (idx !== here) return;
   const keptBx = keep ? boxes.filter(bx => bx.state === "yes") : [];
   const kept = keptBx.map(bx => bx.b), outlines = keptBx.map(bx => bx.poly || null);
-  const r = await (await fetch("/api/item/" + encodeURIComponent(it.name), {
+  const r = await (await fetch("api/item/" + encodeURIComponent(it.name), {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status, boxes: kept, outlines }),
   })).json();

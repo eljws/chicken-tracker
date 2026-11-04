@@ -255,6 +255,9 @@ def make_handler(run_dir: Path):
                 if self.path == "/api/merge":
                     label = f"merged {name_of(body['src'])} into {name_of(body['dst'])}"
                     return self._json(mutate(lambda d: I.merge_chickens(d, int(body["src"]), int(body["dst"])), label))
+                if self.path == "/api/confirm_all":
+                    label = f"all remaining pieces of {name_of(body['chicken'])} confirmed"
+                    return self._json(mutate(lambda d: I.confirm_all(d, int(body["chicken"])), label))
                 if self.path == "/api/answer":
                     ch = body.get("chicken")
                     v = str(body["verdict"])

@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Chicken tracker</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #141414; color: #eee; font: 14px/1.45 system-ui, sans-serif; }
+  header { padding: 10px 18px; background: #1f1f1f; display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 18px; }
+  nav a { color: #ddd; text-decoration: none; margin-right: 14px; padding: 4px 10px; border-radius: 6px; background: #2a2a2a; }
+  nav a:hover { background: #383838; }
+  nav .badge { background: #ffb74d; color: #222; border-radius: 9px; padding: 0 6px; font-size: 12px; margin-left: 4px; }
+  .layout { display: flex; gap: 22px; padding: 16px 18px; align-items: flex-start; }
+  .cals { display: flex; flex-direction: column; gap: 16px; flex: none; }
+  .cal { background: #1d1d1d; border: 1px solid #2c2c2c; border-radius: 8px; padding: 10px; width: 270px; }
+  .cal h3 { margin: 0 0 6px; font-size: 14px; color: #bbb; }
+  .grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+  .grid .dow { font-size: 11px; color: #777; text-align: center; }
+  .day { height: 34px; border-radius: 5px; text-align: center; font-size: 13px; color: #555; position: relative; padding-top: 3px; }
+  .day.has { background: #2b3a2b; color: #eee; cursor: pointer; }
+  .day.has:hover { background: #3b523b; }
+  .day.sel { outline: 2px solid #4caf50; }
+  .day.todo { background: #4a3b20; }
+  .day .n { position: absolute; bottom: 1px; left: 0; right: 0; font-size: 10px; color: #9c9; }
+  .day.todo .n { color: #ffb74d; }
+  .day.today { box-shadow: inset 0 0 0 1px #666; }
+  .clips { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+  .clips h2 { margin: 0 0 4px; font-size: 18px; }
+  .card { background: #1d1d1d; border: 1px solid #2c2c2c; border-radius: 8px; padding: 10px; display: flex; gap: 14px; }
+  .card.running { border-color: #ffc107; }
+  .thumb { width: 220px; height: 176px; object-fit: cover; border-radius: 5px; background: #111; flex: none; }
+  .info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+  .when { font-size: 16px; font-weight: 600; }
+  .muted { color: #999; }
+  .steps { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: #262626; color: #777; }
+  .chip.done { color: #81c784; } .chip.running { color: #ffc107; } .chip.failed, .chip.stalled { color: #f44336; }
+  .todo-line { color: #ffb74d; } .ok-line { color: #81c784; }
+  .hens { font-size: 13px; color: #bbb; }
+  .hens b { color: #eee; font-weight: 600; }
+  .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: auto; }
+  .btns a, .btns span { padding: 5px 12px; border-radius: 6px; text-decoration: none; font-size: 13px; }
+  .btns a { background: #2e4a2e; color: #e8f5e9; } .btns a:hover { background: #3d613d; }
+  .btns span { background: #222; color: #555; cursor: help; }
+  .empty { color: #888; padding: 30px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🐔 Chicken tracker</h1>
+  <nav id="nav">
+    <a href="progress/" target="_blank">⏳ Progress</a>
+    <a href="review/" target="_blank" id="nrev">🖼 Label frames</a>
+    <a href="pose/" target="_blank" id="npose">🦴 Label skeletons</a>
+  </nav>
+  <span class="muted" id="sub"></span>
+</header>
+<div class="layout"><div class="cals" id="cals"></div><div class="clips" id="clips"></div></div>
+<script>
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const STEP_SHORT = { detect: "detect", pieces: "pieces", naming: "naming", skeletons: "skeletons", pecks: "pecks" };
+let D = null, sel = decodeURIComponent(location.hash.slice(1)) || null, lastJson = "";
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+const byDay = () => {
+  const m = {};
+  for (const r of D.runs) (m[r.date || "undated"] ||= []).push(r);
+  for (const k in m) m[k].sort((a, b) => (a.from || "").localeCompare(b.from || ""));
+  return m;
+};
+const needsYou = r => r.counts && (r.counts.conflicts + r.counts.questions) > 0;
+
+function renderCals(days) {
+  const dated = Object.keys(days).filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d));
+  const months = [...new Set(dated.map(d => d.slice(0, 7)))].sort().reverse();
+  const today = new Date().toISOString().slice(0, 10);
+  if (!months.includes(today.slice(0, 7))) months.unshift(today.slice(0, 7));
+  let h = "";
+  for (const ym of months) {
+    const [y, m] = ym.split("-").map(Number), first = new Date(y, m - 1, 1), n = new Date(y, m, 0).getDate();
+    const lead = (first.getDay() + 6) % 7;  // weeks start on Monday
+    let cells = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].map(d => `<div class="dow">${d}</div>`).join("");
+    cells += "<div></div>".repeat(lead);
+    for (let d = 1; d <= n; d++) {
+      const key = `${ym}-${String(d).padStart(2, "0")}`, rs = days[key];
+      const cls = ["day", rs ? "has" : "", rs && rs.some(needsYou) ? "todo" : "", key === sel ? "sel" : "", key === today ? "today" : ""].join(" ");
+      cells += `<div class="${cls}" ${rs ? `data-day="${key}" title="${rs.length} clip${rs.length > 1 ? "s" : ""}"` : ""}>${d}` +
+        (rs ? `<div class="n">${rs.length} clip${rs.length > 1 ? "s" : ""}</div>` : "") + `</div>`;
+    }
+    h += `<div class="cal"><h3>${MONTHS[m - 1]} ${y}</h3><div class="grid">${cells}</div></div>`;
+  }
+  if (days.undated) h += `<div class="cal"><div class="day has ${sel === "undated" ? "sel" : ""}" data-day="undated">no date (${days.undated.length})</div></div>`;
+  const el = document.getElementById("cals");
+  el.innerHTML = h;
+  el.querySelectorAll("[data-day]").forEach(c => c.onclick = () => { sel = c.dataset.day; location.hash = sel; render(true); });
+}
+
+function card(r) {
+  const running = r.steps.some(s => s.state === "running");
+  const chips = r.steps.map(s => {
+    const pct = s.state === "running" && s.total ? ` ${Math.round(100 * s.done / s.total)}%` : "";
+    const mark = { done: "✓", running: "…", failed: "✗", stalled: "?" }[s.state] || "·";
+    return `<span class="chip ${s.state}" title="${esc(s.label)}: ${s.state}">${mark} ${STEP_SHORT[s.key] || s.key}${pct}</span>`;
+  }).join("");
+  let naming = "";
+  if (r.counts) {
+    const todo = r.counts.conflicts + r.counts.questions;
+    naming = todo ? `<div class="todo-line">Naming: ${r.counts.conflicts} conflicts · ${r.counts.questions} questions for you · ${r.counts.confirmed}/${r.counts.pieces} pieces confirmed</div>`
+                  : `<div class="ok-line">Naming: nothing waiting · ${r.counts.confirmed}/${r.counts.pieces} pieces confirmed</div>`;
+    if (r.naming && r.naming.auto) naming = naming.replace("Naming:", "Naming (started by the recogniser):");
+  }
+  const hens = r.hens.length ? `<div class="hens">${r.hens.map(h => `<b>${esc(h.name)}</b> ${h.visible_min} min` +
+    (h.pecks != null ? ` · ${h.pecks} pecks` : "")).join(" &nbsp; ")}</div>` : "";
+  const L = r.links, btn = (href, label, why) => href ? `<a href="${href}" target="_blank">${label}</a>` : `<span title="${why}">${label}</span>`;
+  return `<div class="card ${running ? "running" : ""}">
+    ${r.thumb ? `<img class="thumb" src="${r.thumb}" loading="lazy">` : `<div class="thumb"></div>`}
+    <div class="info">
+      <div class="when">${r.from ? `${r.from} – ${r.to}` : esc(r.run)} <span class="muted" style="font-size:13px;font-weight:400">${r.minutes ? r.minutes + " min" : ""} · ${esc(r.run)}</span></div>
+      <div class="steps">${chips}</div>${naming}${hens}
+      <div class="btns">
+        ${btn(L.player, "▶ Player", "No browser copy yet: chicken-tracker player RUN --encode-only")}
+        ${btn(L.naming, "✎ Naming", "Not named yet: chicken-tracker identify RUN")}
+        ${btn(L.clips, "🎞 Set-aside clips", "No clips made for this run")}
+      </div>
+    </div></div>`;
+}
+
+function render(force) {
+  const days = byDay();
+  const keys = Object.keys(days).sort().reverse();
+  if (!sel || !days[sel]) sel = keys.find(k => k !== "undated") || keys[0] || null;
+  renderCals(days);
+  const el = document.getElementById("clips");
+  if (!sel) { el.innerHTML = `<div class="empty">No processed clips yet. Run <code>chicken-tracker process VIDEO</code>.</div>`; return; }
+  const rs = days[sel];
+  const title = sel === "undated" ? "Clips without a date" :
+    new Date(sel + "T12:00").toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  el.innerHTML = `<h2>${title} <span class="muted" style="font-size:14px;font-weight:400">${rs.length} clip${rs.length > 1 ? "s" : ""}</span></h2>` + rs.map(card).join("");
+}
+
+async function refresh() {
+  try {
+    const txt = await (await fetch("api/home")).text();
+    D = JSON.parse(txt);
+    const running = D.runs.filter(r => r.steps.some(s => s.state === "running")).length;
+    document.getElementById("sub").textContent = `${D.runs.length} clips · ${running ? running + " processing now" : "nothing processing"}`;
+    const badge = (id, n, label) => { document.getElementById(id).innerHTML = label + (n ? `<span class="badge">${n}</span>` : ""); };
+    badge("nrev", D.review_pending, "🖼 Label frames"); badge("npose", D.pose_pending, "🦴 Label skeletons");
+    // redraw only when something changed (thumbnails are cached, so a redraw doesn't blink)
+    const key = JSON.stringify(D.runs.map(r => [r.run, r.steps.map(s => [s.state, s.total ? Math.round(100 * s.done / s.total) : 0]), r.counts, r.links, r.thumb, r.hens]));
+    if (key !== lastJson) { lastJson = key; render(); }
+  } catch (e) { document.getElementById("sub").textContent = "server not reachable"; }
+}
+window.addEventListener("hashchange", () => { sel = decodeURIComponent(location.hash.slice(1)); if (D) render(); });
+refresh(); setInterval(refresh, 5000);
+</script>
+</body>
+</html>
