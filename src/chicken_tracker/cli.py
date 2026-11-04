@@ -107,9 +107,21 @@ def cmd_review(a: argparse.Namespace) -> None:
           outline=not a.no_outline, device=a.device, pose=a.pose)
 
 
-def cmd_train(a: argparse.Namespace) -> None:
-    from .labeling import train, train_pose
+def cmd_outline(a: argparse.Namespace) -> None:
+    from .labeling import auto_outline
 
+    r = auto_outline(a.dataset, device=a.device, redo=a.redo)
+    print(f"{r['frames']} frames: {r['outlined']} hens outlined, {r['failed']} left as boxes")
+
+
+def cmd_train(a: argparse.Namespace) -> None:
+    from .labeling import train, train_pose, train_seg
+
+    if a.seg:
+        train_seg(a.dataset, model=a.model if a.model != "yolo11s.pt" else "yolo11s-seg.pt", epochs=a.epochs,
+                  imgsz=a.imgsz, batch=a.batch, device=a.device, name=a.name if a.name != "chicken" else "seg",
+                  exclude_source=a.exclude_source)
+        return
     if a.pose:
         train_pose(a.dataset, epochs=a.epochs, imgsz=a.imgsz, batch=a.batch, device=a.device)
         return
@@ -294,9 +306,17 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--device", help="cpu, mps, 0, ...")
     p.add_argument("--name", default="chicken", help="run name: weights go to <dataset>/runs/<name>/")
     p.add_argument("--pose", action="store_true", help="train the chicken skeleton model instead")
+    p.add_argument("--seg", action="store_true", help="train the hen outline model instead (run `outline` first)")
+    p.add_argument("--exclude-source", help="leave out frames whose source starts with this (test on an unseen day)")
     p.add_argument("--with-objects", action="store_true",
                    help="also learn feeder/water (needs the objects pass on most frames)")
     p.set_defaults(func=cmd_train)
+
+    p = sub.add_parser("outline", help="SAM outlines for reviewed hens that only have boxes (for `train --seg`)")
+    p.add_argument("dataset", type=Path, nargs="?", default=Path("dataset"))
+    p.add_argument("--device", help="cpu, mps, 0, ...")
+    p.add_argument("--redo", action="store_true", help="redo frames that already have automatic outlines")
+    p.set_defaults(func=cmd_outline)
 
     p = sub.add_parser("identify", help="group track pieces into named chickens (opens naming page)")
     p.add_argument("run_dir", type=Path, help="e.g. output/<video-name>")

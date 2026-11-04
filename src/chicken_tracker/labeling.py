@@ -75,6 +75,7 @@ class LabelStore:
                 self.items[name]["outlines"] = outlines
             else:
                 self.items[name].pop("outlines", None)
+            self.items[name].pop("auto_outlines", None)  # boxes changed: automatic outlines are stale
         self.save()
 
     def update_objects(self, name: str, status: str, objects: list[list[float]],
@@ -443,6 +444,119 @@ def train(root: Path, model: str = "yolo11s.pt", epochs: int = 100, imgsz: int =
                       fliplr=0.5, flipud=0.0, mosaic=1.0)
     best = runs / name / "weights" / "best.pt"
     print(f"\nTrained model: {best}\nUse it with: chicken-tracker process VIDEO --model {best}")
+    return best
+
+
+# ---------------------------------------------------------------- hen outlines (seg)
+
+def auto_outline(root: Path, device: str | None = None, outliner=None, redo: bool = False) -> dict:
+    """SAM outlines for reviewed hens that have a box but no outline (e.g. boxes drawn by hand).
+
+    Stored per frame as ``auto_outlines`` (one per box, None where you outlined it yourself or
+    SAM failed). Your own outlines are never touched. Returns counts.
+    """
+    if outliner is None:
+        from .outline import Outliner
+        outliner = Outliner(device=device)
+    store = LabelStore(root)
+    todo = [k for k, v in store.items.items() if v["status"] == "done" and v["boxes"]
+            and (redo or "auto_outlines" not in v) and not _all_mine(v)]
+    made = failed = 0
+    for i, k in enumerate(sorted(todo)):
+        it = store.items[k]
+        mine = it.get("outlines") or []
+        need = [j for j, b in enumerate(it["boxes"]) if not (j < len(mine) and mine[j])]
+        if not need:
+            continue
+        outs = outliner.outline_boxes(store.images / k, [it["boxes"][j] for j in need], clip=True)
+        auto = [None] * len(it["boxes"])
+        for j, o in zip(need, outs):
+            auto[j] = o["poly"] if o else None
+            made += o is not None
+            failed += o is None
+        with store._lock:
+            store._reload()
+            if store.items[k]["boxes"] == it["boxes"]:  # unchanged while we worked
+                store.items[k]["auto_outlines"] = auto
+        store.save()
+        if (i + 1) % 25 == 0:
+            print(f"  outlined {i + 1}/{len(todo)} frames", flush=True)
+    return {"frames": len(todo), "outlined": made, "failed": failed}
+
+
+def _all_mine(it: dict) -> bool:
+    mine = it.get("outlines") or []
+    return len(mine) == len(it["boxes"]) and all(mine)
+
+
+def frame_polys(it: dict) -> list | None:
+    """One outline per box (yours first, else automatic), or None if any hen has no outline -
+    a hen without an outline would teach the seg model that she's background."""
+    mine, auto = it.get("outlines") or [], it.get("auto_outlines") or []
+    polys = []
+    for j in range(len(it["boxes"])):
+        p = (mine[j] if j < len(mine) else None) or (auto[j] if j < len(auto) else None)
+        if not p or len(p) < 3:
+            return None
+        polys.append(p)
+    return polys
+
+
+def export_seg(root: Path, exclude_source: str | None = None) -> Path:
+    """Reviewed frames with every hen outlined, as a YOLO segmentation dataset; returns data.yaml.
+
+    Frames with no hens are kept (they teach "empty yard"). ``exclude_source`` leaves a group
+    of frames out (e.g. one day, to test the model on a day it never saw).
+    """
+    store = LabelStore(root)
+    out = Path(root) / "yolo_seg"
+    if out.exists():
+        shutil.rmtree(out)
+    done, dropped = {}, 0
+    for k, v in store.items.items():
+        if v["status"] != "done" or (exclude_source and v.get("source", "").startswith(exclude_source)):
+            continue
+        polys = frame_polys(v) if v["boxes"] else []
+        if polys is None:
+            dropped += 1
+            continue
+        done[k] = {**v, "polys": polys}
+    if not done:
+        raise SystemExit("No outlined frames yet - run `chicken-tracker outline` first.")
+    splits = split_train_val(done)
+    for split in ("train", "val"):
+        (out / "images" / split).mkdir(parents=True)
+        (out / "labels" / split).mkdir(parents=True)
+    for name, it in done.items():
+        split = splits[name]
+        src = store.images / name
+        h, w = cv2.imread(str(src)).shape[:2]
+        try:
+            os.link(src, out / "images" / split / name)
+        except OSError:
+            shutil.copy2(src, out / "images" / split / name)
+        lines = ["0 " + " ".join(f"{x / w:.6f} {y / h:.6f}" for x, y in poly) for poly in it["polys"]]
+        (out / "labels" / split / (Path(name).stem + ".txt")).write_text("\n".join(lines))
+    data = out / "data.yaml"
+    data.write_text(f"path: {out.resolve()}\ntrain: images/train\nval: images/val\nnames:\n  0: chicken\n")
+    n_val = sum(1 for s in splits.values() if s == "val")
+    print(f"Exported {len(done)} frames ({len(done) - n_val} train / {n_val} val), "
+          f"{dropped} left out (a hen without an outline) -> {data}")
+    return data
+
+
+def train_seg(root: Path, model: str = "yolo11s-seg.pt", epochs: int = 100, imgsz: int = 1280,
+              batch: int = 8, device: str | None = None, name: str = "seg",
+              exclude_source: str | None = None) -> Path:
+    from ultralytics import YOLO
+
+    data = export_seg(root, exclude_source=exclude_source)
+    runs = (Path(root) / "runs").resolve()
+    YOLO(model).train(data=str(data), epochs=epochs, imgsz=imgsz, batch=batch, device=device,
+                      project=str(runs), name=name, exist_ok=True, patience=50,
+                      optimizer="SGD", lr0=0.01, fliplr=0.5, flipud=0.0, mosaic=1.0)
+    best = runs / name / "weights" / "best.pt"
+    print(f"\nTrained outline model: {best}")
     return best
 
 

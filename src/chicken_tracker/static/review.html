@@ -75,7 +75,7 @@ function show(i) {
     // suggestions start accepted and get outlined straight away: only wrong ones need a click
     boxes = it.proposals.map(p => ({ b: p.slice(0, 4), conf: p[4], state: "yes" }))
       // boxes around several birds, or seen by only one source: shown faintly, off until clicked
-      .concat((it.merged || []).map(p => ({ b: p.slice(0, 4), conf: p[4], state: "maybe" })))
+      .concat((it.merged || []).map(p => ({ b: p.slice(0, 4), state: "maybe", tag: "2 hens?" })))
       .concat((it.doubtful || []).map(p => ({ b: p.slice(0, 4), state: "maybe" })));
     outlining = autoOutline(idx, boxes.filter(bx => bx.state === "yes"));
   } else {
@@ -90,7 +90,7 @@ function show(i) {
   document.querySelector("#bar div").style.width = (100 * done / total) + "%";
   const t = Math.round(it.time_s), mm = String(Math.floor(t / 60)).padStart(2, "0"), ss = String(t % 60).padStart(2, "0");
   document.getElementById("meta").textContent =
-    `${it.video.split("/").pop()} @ ${mm}:${ss} · ${it.status}`;
+    `${it.video.split("/").pop()} @ ${mm}:${ss} · ${it.status}` + (it.recheck && it.status === "pending" ? ` · recheck: ${it.recheck}` : "");
   // get the next frame's outlines ready while this one is looked at
   const nxt = items.findIndex((x, j) => j > idx && x.status === "pending");
   if (outlineOn && nxt >= 0) fetchAuto(items[nxt].name, items[nxt].proposals.map(p => p.slice(0, 4))).catch(() => {});
@@ -162,6 +162,7 @@ function draw() {
     ctx.strokeStyle = adding ? COLORS.yes : hot ? COLORS.no : COLORS[bx.state];
     ctx.setLineDash(!hot && (bx.state === "pending" || bx.state === "maybe") ? [lw * 4, lw * 2] : []);
     ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    if (bx.tag && bx.state === "maybe" && !hot) { ctx.fillStyle = COLORS.maybe; ctx.fillText(bx.tag, x1, y1 - 4); }
     if (hot) {  // say what the click will do
       ctx.fillStyle = ctx.strokeStyle; ctx.fillText(adding ? "+ add" : "✕ remove", x1, y1 - 4);
     }
@@ -243,7 +244,7 @@ async function outlineAt(x, y, trim) {
     bx.b = out.box; bx.poly = out.poly;
     lastOutline = { bx, pts, lbls };
     // a suggestion for the same bird is now redundant
-    for (const o of boxes) if (o !== bx && !o.user && o.state !== "no" && iou(o.b, bx.b) > 0.5) o.state = "no";
+    for (const o of boxes) if (o !== bx && !o.user && o.state === "yes" && iou(o.b, bx.b) > 0.5) o.state = "no";
   } catch (e) { toast("outline failed - drag a box instead"); }
   finally { clearTimeout(slow); busy = false; canvas.style.cursor = outlineMode ? "cell" : ""; draw(); }
 }
@@ -259,7 +260,7 @@ async function saveNow(status, keep) {
   // outlines still coming? wait for them (up to 3 s) so the tight boxes get saved, not the rough ones
   if (keep) await Promise.race([outlining, new Promise(r => setTimeout(r, 3000))]);
   if (idx !== here) return;
-  const keptBx = keep ? boxes.filter(bx => bx.state !== "no") : [];
+  const keptBx = keep ? boxes.filter(bx => bx.state === "yes") : [];
   const kept = keptBx.map(bx => bx.b), outlines = keptBx.map(bx => bx.poly || null);
   const r = await (await fetch("/api/item/" + encodeURIComponent(it.name), {
     method: "POST", headers: { "Content-Type": "application/json" },

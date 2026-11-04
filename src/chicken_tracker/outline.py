@@ -56,10 +56,14 @@ class Outliner:
         mask = r.masks.data[0].cpu().numpy().astype(np.uint8)
         return mask_to_outline(mask, points[0])
 
-    def outline_boxes(self, image: Path, boxes: list[list[float]]) -> list[dict | None]:
+    def outline_boxes(self, image: Path, boxes: list[list[float]], clip: bool = False,
+                      max_spill: float = 0.3) -> list[dict | None]:
         """One outline per suggested box (the box is SAM's prompt), in the same order.
 
         Used to show a frame already outlined, so nothing needs clicking unless it's wrong.
+        clip=True is for boxes a person checked: the hen is inside her box, so the outline is
+        cut to it (SAM likes to run on into a touching hen or the feed tray), and an outline
+        with more than ``max_spill`` of its area outside the box is dropped - SAM was confused.
         """
         if not boxes:
             return []
@@ -73,7 +77,19 @@ class Outliner:
         masks = [] if r.masks is None else r.masks.data.cpu().numpy().astype(np.uint8)
         out = []
         for i, b in enumerate(boxes):
-            o = mask_to_outline(masks[i], [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]) if i < len(masks) else None
+            m = masks[i] if i < len(masks) else None
+            if m is not None and clip:
+                inside = np.zeros_like(m)
+                pad = 0.03 * max(b[2] - b[0], b[3] - b[1])
+                x1, y1 = int(max(0, b[0] - pad)), int(max(0, b[1] - pad))
+                x2, y2 = int(np.ceil(b[2] + pad)), int(np.ceil(b[3] + pad))
+                inside[y1:y2, x1:x2] = 1
+                total = int(m.sum())
+                m = m & inside
+                if total == 0 or 1 - m.sum() / total > max_spill:
+                    out.append(None)
+                    continue
+            o = mask_to_outline(m, [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]) if m is not None else None
             # SAM sometimes grabs the whole yard or a sliver: then keep the suggested box as it was
             if o is not None and not (0.5 <= _area(o["box"]) / max(_area(b), 1.0) <= 1.6):
                 o = None

@@ -387,3 +387,58 @@ def test_outline_boxes_falls_back_when_sam_grabs_too_much():
                           "__call__": lambda s, bboxes: [R(np.stack([m_ok, m_big]))]})()
     out = o.outline_boxes("img.jpg", [[8, 8, 32, 32], [40, 40, 60, 60]])
     assert out[0]["box"] == [10.0, 10.0, 30.0, 30.0] and out[1] is None
+
+
+def test_auto_outline_and_seg_export(tmp_path):
+    import cv2, json
+    from chicken_tracker.labeling import LabelStore, auto_outline, export_seg, frame_polys
+    (tmp_path / "images").mkdir()
+    items = {}
+    for i in range(10):
+        n = f"v__f{i:07d}.jpg"
+        cv2.imwrite(str(tmp_path / "images" / n), np.zeros((100, 200, 3), np.uint8))
+        items[n] = {"video": "v", "frame": i, "time_s": i, "proposals": [], "status": "done",
+                    "boxes": [[10, 10, 30, 30], [50, 50, 80, 90]] if i % 3 else []}
+    items["v__f0000001.jpg"]["outlines"] = [[[10, 10], [30, 10], [30, 30]], None]   # one hen done by hand
+    items["v__f0000002.jpg"]["source"] = "factory-x"
+    (tmp_path / "labels.json").write_text(json.dumps(items))
+
+    class Fake:
+        def outline_boxes(self, image, boxes, clip=False):
+            assert clip  # boxes you checked: outlines are cut to them
+            # second hen of frame 4 fails
+            return [None if "f0000004" in str(image) and b[0] == 50 else
+                    {"box": b, "poly": [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]]]} for b in boxes]
+
+    r = auto_outline(tmp_path, outliner=Fake())
+    assert r["frames"] == 6 and r["failed"] == 1
+    st = LabelStore(tmp_path)
+    assert frame_polys(st.items["v__f0000001.jpg"])[0] == [[10, 10], [30, 10], [30, 30]]  # yours kept
+    assert frame_polys(st.items["v__f0000004.jpg"]) is None
+    data = export_seg(tmp_path, exclude_source="factory")
+    labels = list((data.parent / "labels").rglob("*.txt"))
+    names = {p.stem for p in labels}
+    assert "v__f0000004" not in names and "v__f0000002" not in names and "v__f0000000" in names
+    line = (data.parent / "labels" / next(p.parent.name for p in labels if p.stem == "v__f0000001") /
+            "v__f0000001.txt").read_text().splitlines()[0]
+    assert line.startswith("0 0.050000 0.100000 0.150000 0.100000")
+    # re-saving a frame drops its stale automatic outlines
+    st.update("v__f0000005.jpg", "done", [[1, 1, 5, 5]])
+    assert "auto_outlines" not in LabelStore(tmp_path).items["v__f0000005.jpg"]
+
+
+def test_outline_boxes_clips_to_checked_box():
+    from chicken_tracker.outline import Outliner
+
+    class R:
+        def __init__(self, masks):
+            import torch
+            self.masks = type("M", (), {"data": torch.tensor(masks)})()
+
+    spill = np.zeros((100, 100), np.uint8); spill[10:30, 10:34] = 1          # runs 4 px past the box
+    merged = np.zeros((100, 100), np.uint8); merged[40:60, 40:90] = 1         # half of it is a neighbour
+    o = Outliner()
+    o._p = type("P", (), {"reset_image": lambda s: None, "set_image": lambda s, im: None,
+                          "__call__": lambda s, bboxes: [R(np.stack([spill, merged]))]})()
+    out = o.outline_boxes("img.jpg", [[10, 10, 30, 30], [40, 40, 64, 60]], clip=True)
+    assert out[0]["box"][2] <= 31 and out[1] is None
