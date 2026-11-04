@@ -349,20 +349,29 @@ def build(run_dir: Path, threshold: float = 0.80, flock_size: int | None = None,
     store.root.mkdir(parents=True, exist_ok=True)
     crops_dir = store.root / "crops"
 
-    print(f"Selecting crops for {len(tids)} fragments ...")
-    picks = select_crops(det, tids)
-    print(f"Extracting {len(picks)} crops from {Path(video).name} ...")
-    picks["crop"] = extract_crops(video, picks, crops_dir)
-    picks = picks[picks.crop != ""].reset_index(drop=True)
-    print("Embedding appearance ...")
-    feats = embed_crops([crops_dir / c for c in picks.crop], device=device)
-    np.save(store.root / "features.npy", feats)
-    picks.to_csv(store.root / "crops.csv", index=False)
+    from .progress import Progress
+    with Progress(run_dir, "pieces", total=4) as prog:
+        prog.update(0, phase="picking crops", force=True)
+        print(f"Selecting crops for {len(tids)} fragments ...")
+        picks = select_crops(det, tids)
+        prog.update(1, phase=f"cutting {len(picks)} crops from the video", force=True)
+        print(f"Extracting {len(picks)} crops from {Path(video).name} ...")
+        picks["crop"] = extract_crops(video, picks, crops_dir)
+        picks = picks[picks.crop != ""].reset_index(drop=True)
+        from .preview_img import crop_grid
+        prog.preview(crop_grid([crops_dir / c for c in picks.crop.sample(min(40, len(picks)), random_state=0)]),
+                     width=800)
+        prog.update(2, phase="appearance features", force=True)
+        print("Embedding appearance ...")
+        feats = embed_crops([crops_dir / c for c in picks.crop], device=device)
+        np.save(store.root / "features.npy", feats)
+        picks.to_csv(store.root / "crops.csv", index=False)
 
-    frags = fragments(det, picks, feats)
-    clusters = cluster(frags, threshold=threshold, max_clusters=flock_size)
-    store.data = _fresh_state(frags, clusters, picks, video, meta)
-    store.save()
+        prog.update(3, phase="grouping pieces", force=True)
+        frags = fragments(det, picks, feats)
+        clusters = cluster(frags, threshold=threshold, max_clusters=flock_size)
+        store.data = _fresh_state(frags, clusters, picks, video, meta)
+        store.save()
     n_q = len(questions(store.data))
     print(f"{len(frags)} fragments -> {len(clusters)} candidate chickens; {n_q} questions for you.")
     return store.data

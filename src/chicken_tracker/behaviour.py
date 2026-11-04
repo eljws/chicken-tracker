@@ -44,7 +44,8 @@ def _disk_motion(diff: np.ndarray, x: float, y: float, r: int) -> float:
     return float(patch[m].mean()) if m.any() else np.nan
 
 
-def motion_signals(video: str, poses: pd.DataFrame, progress: bool = True) -> pd.DataFrame:
+def motion_signals(video: str, poses: pd.DataFrame, progress: bool = True, on_frame=None,
+                   on_picture=None) -> pd.DataFrame:
     """Add head_motion / body_motion columns to poses (one row per hen per frame)."""
     poses = poses.copy()
     ok = (poses.head_c >= MIN_CONF) & (poses.back_c >= MIN_CONF)
@@ -72,7 +73,17 @@ def motion_signals(video: str, poses: pd.DataFrame, progress: bool = True) -> pd
                 i = pos[rows_idx[k]]
                 head[i] = _disk_motion(diff, hx[k], hy[k], radius.iat[k])
                 body[i] = _disk_motion(diff, bx[k], by[k], radius.iat[k])
+            if on_picture is not None and on_picture():
+                heat = cv2.applyColorMap(np.clip(diff * 6, 0, 255).astype(np.uint8), cv2.COLORMAP_INFERNO)
+                pic = cv2.addWeighted(img, 0.55, heat, 0.45, 0)
+                for k in by_frame[f]:  # head (yellow) and back (cyan) circles of each hen
+                    r_ = int(radius.iat[k])
+                    cv2.circle(pic, (int(hx[k]), int(hy[k])), r_, (0, 255, 255), 2)
+                    cv2.circle(pic, (int(bx[k]), int(by[k])), r_, (255, 255, 0), 2)
+                on_picture(pic)
         prev = g
+        if on_frame is not None:
+            on_frame(f + 1, last + 1)
         if progress and f % 3000 == 0:
             print(f"  motion: frame {f}/{last}", flush=True)
         f += 1
@@ -125,7 +136,14 @@ def write_pecking(run_dir: Path, video: str | None = None, **kw) -> dict:
     meta = json.loads((run_dir / "meta.json").read_text())
     fps = meta["video"]["fps"]
     poses = pd.read_csv(run_dir / "poses.csv")
-    sig = motion_signals(video or meta["video"]["path"], poses)
+    from .progress import Progress
+    with Progress(run_dir, "pecks") as prog:
+        def picture(img=None):
+            if img is None:
+                return prog.preview_due()
+            prog.preview(img)
+        sig = motion_signals(video or meta["video"]["path"], poses, on_frame=lambda f, t: prog.update(f, t),
+                             on_picture=picture)
     sig[["frame", "chicken", "head_motion", "body_motion", "body_shift"]].to_csv(run_dir / "peck_signal.csv", index=False,
                                                                     float_format="%.1f")
     stations = load_stations(run_dir)

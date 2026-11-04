@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Chicken tracker · progress</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #141414; color: #eee; font: 14px/1.45 system-ui, sans-serif; }
+  header { padding: 12px 18px; background: #1f1f1f; display: flex; gap: 16px; align-items: baseline; }
+  header h1 { margin: 0; font-size: 18px; }
+  header .sub { color: #999; }
+  main { padding: 14px 18px; display: flex; flex-direction: column; gap: 18px; }
+  h2 { font-size: 15px; margin: 4px 0 6px; color: #bbb; }
+  .run { background: #1d1d1d; border: 1px solid #2c2c2c; border-radius: 8px; padding: 10px 14px; }
+  .run.active { border-color: #4caf50; }
+  .top { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; }
+  .when { font-weight: 600; font-size: 15px; }
+  .muted { color: #999; }
+  .steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 8px; }
+  .step { background: #262626; border-radius: 6px; padding: 6px 8px; min-height: 52px; }
+  .step .name { font-size: 12px; color: #aaa; }
+  .step .st { font-weight: 600; }
+  .done .st { color: #4caf50; } .todo .st { color: #666; } .failed .st, .stalled .st { color: #f44336; }
+  .running .st { color: #ffc107; }
+  .bar { height: 6px; background: #333; border-radius: 3px; margin-top: 4px; overflow: hidden; }
+  .bar div { height: 100%; background: #ffc107; transition: width .5s; }
+  .phase { font-size: 11px; color: #aaa; margin-top: 2px; }
+  .hens { margin-top: 6px; font-size: 13px; color: #bbb; }
+  .hens b { color: #eee; font-weight: 600; }
+  .empty { color: #888; padding: 30px; text-align: center; }
+  .pics { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; align-items: flex-start; }
+  .pic { background: #262626; border-radius: 6px; padding: 6px; }
+  .pic .cap { font-size: 12px; color: #bbb; margin-bottom: 4px; }
+  .pic img { display: block; border-radius: 4px; cursor: zoom-in; height: auto; min-height: 60px; background: #1a1a1a; }
+  .pic.live { outline: 2px solid #ffc107; }
+  .pic.live .cap::before { content: "● live  "; color: #ffc107; }
+  #zoom { position: fixed; inset: 0; background: rgba(0,0,0,.85); display: none; align-items: center;
+          justify-content: center; cursor: zoom-out; z-index: 9; }
+  #zoom img { max-width: 95vw; max-height: 95vh; }
+</style>
+</head>
+<body>
+<header><h1>🐔 Chicken tracker</h1><span class="sub" id="sub">loading…</span></header>
+<main id="main"></main>
+<div id="zoom" onclick="this.style.display='none'"><img></div>
+<script>
+const fmt = s => {
+  if (!isFinite(s) || s < 0) return "";
+  s = Math.round(s); const h = s / 3600 | 0, m = (s % 3600) / 60 | 0, ss = s % 60;
+  return h ? `${h} h ${m} min` : m ? `${m} min ${ss ? ss + " s" : ""}` : `${ss} s`;
+};
+function stepHtml(s, now) {
+  let st = { done: "✓ done", todo: "–", failed: "✗ failed", stalled: "stopped?" }[s.state] || "";
+  let bar = "", phase = s.phase ? `<div class="phase">${s.phase}</div>` : "";
+  if (s.state === "running") {
+    const frac = s.total ? Math.min(1, s.done / s.total) : 0;
+    const el = (s.updated || now) - s.started, eta = frac > 0.01 ? el / frac - el : NaN;
+    st = s.total ? `${Math.round(frac * 100)}%` : "running…";
+    if (isFinite(eta)) st += ` · ${fmt(eta)} left`;
+    bar = `<div class="bar"><div style="width:${(frac * 100).toFixed(1)}%"></div></div>`;
+  } else if (s.state === "done" && s.finished && s.started) {
+    phase = `<div class="phase">took ${fmt(s.finished - s.started)}</div>`;
+  } else if (s.state === "failed") {
+    phase = `<div class="phase" title="${(s.error || "").replace(/"/g, "&quot;")}">${(s.error || "").slice(0, 60)}</div>`;
+  }
+  return `<div class="step ${s.state}"><div class="name">${s.label}</div><div class="st">${st}</div>${bar}${phase}</div>`;
+}
+const CAPTION = { detect: "Boxes found", pieces: "Crops of the pieces", naming: "Who the recogniser thinks is who",
+  skeletons: "Skeletons", pecks: "Head (yellow) and body (cyan) movement" };
+const runKey = r => "run-" + r.run.replace(/[^a-zA-Z0-9]/g, "_");
+function zoomPic(src) { const z = document.getElementById("zoom"); z.querySelector("img").src = src; z.style.display = "flex"; }
+
+// pictures: kept as the same <img> elements between refreshes; a new picture is loaded off-screen
+// and swapped in only once it's ready, so nothing on the page moves or blinks
+function updatePics(box, r) {
+  const withPic = r.steps.filter(s => s.picture);
+  const live = withPic.find(s => s.state === "running");
+  const big = live || withPic.find(s => s.key === "naming") || withPic[withPic.length - 1];
+  const order = big ? [big, ...withPic.filter(s => s !== big)] : [];
+  order.forEach((s, i) => {
+    let el = box.querySelector(`[data-step="${s.key}"]`);
+    if (!el) {
+      el = document.createElement("div"); el.className = "pic"; el.dataset.step = s.key;
+      el.innerHTML = `<div class="cap"></div><img>`;
+      el.querySelector("img").onclick = () => zoomPic(el.dataset.src);
+      box.appendChild(el);
+    }
+    if (box.children[i] !== el) box.insertBefore(el, box.children[i]);   // moves the node, no reload
+    el.classList.toggle("live", s === live);
+    const cap = `${s.label}: ${CAPTION[s.key] || ""}`;
+    if (el.firstChild.textContent !== cap) el.firstChild.textContent = cap;
+    const w = s === big ? (s.key === "naming" || s.key === "pieces" ? 900 : 640) : 220;
+    const img = el.querySelector("img");
+    if (img.width !== w) img.width = w;
+    if (el.dataset.src !== s.picture && el.dataset.loading !== s.picture) {
+      el.dataset.loading = s.picture;
+      const pre = new Image();
+      pre.onload = () => { if (el.dataset.loading === s.picture) { img.src = s.picture; el.dataset.src = s.picture; } };
+      pre.src = s.picture;
+    }
+  });
+  [...box.children].forEach(el => { if (!order.some(s => s.key === el.dataset.step)) el.remove(); });
+}
+
+async function refresh() {
+  let d;
+  try { d = await (await fetch("/api/runs")).json(); } catch (e) { document.getElementById("sub").textContent = "dashboard server not reachable"; return; }
+  const running = d.runs.filter(r => r.steps.some(s => s.state === "running")).length;
+  document.getElementById("sub").textContent =
+    `${d.runs.length} clip${d.runs.length === 1 ? "" : "s"} · ${running ? running + " working now" : "nothing running"} · updates every 2 s`;
+  const main = document.getElementById("main");
+  if (!d.runs.length) { main.innerHTML = `<div class="empty">No analysed clips yet.</div>`; return; }
+  main.querySelector(".empty")?.remove();
+  const dates = [...new Set(d.runs.map(r => r.date || "other"))].sort().reverse();
+  let pos = 0;
+  for (const date of dates) {
+    let h = main.querySelector(`h2[data-date="${date}"]`);
+    if (!h) { h = document.createElement("h2"); h.dataset.date = date; h.textContent = date; }
+    if (main.children[pos] !== h) main.insertBefore(h, main.children[pos] || null);
+    pos++;
+    for (const r of d.runs.filter(r => (r.date || "other") === date)) {
+      let el = document.getElementById(runKey(r));
+      if (!el) {
+        el = document.createElement("div"); el.id = runKey(r); el.className = "run";
+        el.innerHTML = `<div class="info"></div><div class="pics"></div>`;
+      }
+      if (main.children[pos] !== el) main.insertBefore(el, main.children[pos] || null);
+      pos++;
+      el.classList.toggle("active", r.steps.some(s => s.state === "running"));
+      const hens = r.hens.length ? `<div class="hens">${r.hens.map(h => `<b>${h.name}</b> ${h.visible_min} min` +
+        (h.pecks != null ? ` · ${h.pecks} pecks` : "")).join(" &nbsp;·&nbsp; ")}</div>` : "";
+      const auto = r.naming && r.naming.auto ? ` · named by recogniser (${r.naming.answers} answers since)` : "";
+      const info = `<div class="top"><span class="when">${r.from ? r.from + "–" + r.to : r.run}</span>
+        <span class="muted">${r.minutes ? r.minutes + " min of video" : ""}${auto}</span><span class="muted">${r.run}</span></div>
+        <div class="steps">${r.steps.map(s => stepHtml(s, d.now)).join("")}</div>${hens}`;
+      const infoEl = el.querySelector(".info");
+      if (infoEl.dataset.html !== info) { infoEl.innerHTML = info; infoEl.dataset.html = info; }  // text only: no pictures here
+      updatePics(el.querySelector(".pics"), r);
+    }
+  }
+  while (main.children.length > pos) main.lastChild.remove();
+}
+refresh(); setInterval(refresh, 2000);
+</script>
+</body>
+</html>

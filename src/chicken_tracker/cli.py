@@ -51,7 +51,7 @@ def _collect_videos(inputs: list[Path]) -> list[Path]:
 
 def cmd_process(a: argparse.Namespace) -> None:
     cfg = TrackConfig(model=a.model, conf=a.conf, imgsz=a.imgsz, vid_stride=a.stride,
-                      device=a.device, classes=a.classes)
+                      device=a.device, classes=a.classes, skip_empty=a.skip_empty)
     if a.tracker:
         cfg.tracker = a.tracker
     zones = load_zones(a.zones)
@@ -126,6 +126,11 @@ def cmd_identify(a: argparse.Namespace) -> None:
         identity.build(a.run_dir, flock_size=a.flock_size, device=a.device,
                        video=str(a.video) if a.video else None)
         identity.export(a.run_dir)
+        if a.auto_name:
+            from .recognizer import auto_name
+
+            r = auto_name(a.run_dir, a.recognizer, device=a.device, video=str(a.video) if a.video else None)
+            print(f"Named by the recogniser: {r}")
     if not a.build_only:
         serve(a.run_dir, port=a.port, open_browser=not a.no_browser)
 
@@ -158,6 +163,12 @@ def cmd_pecks(a: argparse.Namespace) -> None:
     from .behaviour import write_pecking
 
     print(write_pecking(a.run_dir, video=str(a.video) if a.video else None))
+
+
+def cmd_dashboard(a: argparse.Namespace) -> None:
+    from .dashboard import serve
+
+    serve(a.out, port=a.port, open_browser=not a.no_browser)
 
 
 def cmd_preview(a: argparse.Namespace) -> None:
@@ -230,6 +241,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--device", help="cpu, mps, 0, ...")
     p.add_argument("--tracker", help="custom tracker YAML (default: bundled chicken_botsort.yaml)")
     p.add_argument("--save-video", action="store_true", help="write annotated.mp4 with IDs")
+    p.add_argument("--skip-empty", action="store_true",
+                   help="quick scan once a second first; track only the stretches with hens in view")
     _add_analytics_args(p)
     p.set_defaults(func=cmd_process)
 
@@ -290,6 +303,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--video", type=Path, help="source video, if it moved since `process`")
     p.add_argument("--flock-size", type=int, help="stop grouping at this many chickens")
     p.add_argument("--rebuild", action="store_true", help="redo grouping (discards your answers)")
+    p.add_argument("--auto-name", action="store_true",
+                   help="name the hens with the recogniser (for a new day; needs a fresh build)")
+    p.add_argument("--recognizer", type=Path, default=Path("recognizer_runs/hens/weights/best.pt"))
     p.add_argument("--build-only", action="store_true")
     p.add_argument("--port", type=int, default=8766)
     p.add_argument("--no-browser", action="store_true")
@@ -320,6 +336,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("run_dir", type=Path)
     p.add_argument("--video", type=Path, help="source video, if it moved since `process`")
     p.set_defaults(func=cmd_pecks)
+
+    p = sub.add_parser("dashboard", help="web page: progress of every analysed clip, live")
+    p.add_argument("-o", "--out", type=Path, default=Path("output"))
+    p.add_argument("--port", type=int, default=8760)
+    p.add_argument("--no-browser", action="store_true")
+    p.set_defaults(func=cmd_dashboard)
 
     p = sub.add_parser("stations", help="feeder/water positions from labelled boxes + per-chicken visits")
     p.add_argument("run_dir", type=Path)

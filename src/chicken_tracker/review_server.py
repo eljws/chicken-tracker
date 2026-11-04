@@ -20,6 +20,7 @@ def make_handler(store: LabelStore, objects: bool = False, outliner=None, pose: 
     page = (resources.files("chicken_tracker") / "static" /
             ("pose.html" if pose else "objects.html" if objects else "review.html")).read_bytes()
     key = "pose_status" if pose else "obj_status" if objects else "status"
+    auto_cache: dict[str, list] = {}  # frame name -> outlines of its suggestions (computed once)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # keep the terminal quiet
@@ -61,6 +62,20 @@ def make_handler(store: LabelStore, objects: bool = False, outliner=None, pose: 
             self._json({"error": "not found"}, 404)
 
         def do_POST(self):
+            if self.path.startswith("/api/auto/"):
+                # outline every suggested box of a frame up front, so the page opens already outlined
+                name = self._safe_name(self.path[len("/api/auto/"):])
+                if name is None or outliner is None:
+                    return self._json({"error": "not available"}, 404)
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                boxes = [[float(v) for v in b[:4]] for b in body.get("boxes", [])][:60]
+                ck = name + json.dumps(boxes)
+                if ck not in auto_cache:
+                    try:
+                        auto_cache[ck] = outliner.outline_boxes(store.images / name, boxes)
+                    except Exception as e:
+                        return self._json({"error": f"outline failed: {e}"}, 500)
+                return self._json({"outlines": auto_cache[ck]})
             if self.path.startswith("/api/outline/"):
                 name = self._safe_name(self.path[len("/api/outline/"):])
                 if name is None or outliner is None:

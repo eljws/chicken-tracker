@@ -335,3 +335,16 @@ def test_rec_stretches_tolerate_one_right_crop():
     w = np.array([0, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0], bool)
     assert _rec_stretches(w) == [(2, 7)]
     assert _rec_stretches(np.array([1, 0, 1, 0, 1, 0], bool)) == []  # joined, but only 5 crops at 60%
+
+
+def test_assign_pieces_one_hen_in_one_place():
+    from chicken_tracker.recognizer import assign_pieces
+    classes = ["Pepper", "Salt", "several"]
+    fr = {1: frag(1, 0, 20, A), 2: frag(2, 5, 15, A), 3: frag(3, 30, 40, A), 4: frag(4, 50, 60, A)}
+    verdict = {1: (np.array([0.05, 0.9, 0.05]), 20),    # sure Salt
+               2: (np.array([0.3, 0.6, 0.1]), 10),      # looks Salt, but Salt is busy (piece 1) -> Pepper
+               3: (np.array([0.1, 0.8, 0.1]), 10),      # Salt again, later: fine
+               4: (np.array([0.1, 0.1, 0.8]), 10)}      # two birds
+    tracks, several, rep = assign_pieces(verdict, fr, classes)
+    assert tracks == [[2], [1, 3]] and several == [4]
+    assert rep == {"named": 2, "second_choice": 1, "several": 1, "conflict": 0}

@@ -220,6 +220,12 @@ def test_review_server_outline_and_saved_outlines(tmp_path):
             assert labels == [1, 0]
             return {"box": [1.0, 2.0, 3.0, 4.0], "poly": [[1, 2], [3, 2], [3, 4]]}
 
+        calls = 0
+
+        def outline_boxes(self, image, boxes):
+            Fake.calls += 1
+            return [{"box": b, "poly": [[0, 0]]} for b in boxes]
+
     srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(store, outliner=Fake()))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
@@ -228,6 +234,10 @@ def test_review_server_outline_and_saved_outlines(tmp_path):
     try:
         assert json.loads(urllib.request.urlopen(base + "/api/config").read())["outline"] is True
         assert post("/api/outline/a.jpg", {"points": [[5, 5], [9, 9]], "labels": [1, 0]})["box"] == [1.0, 2.0, 3.0, 4.0]
+        auto = post("/api/auto/a.jpg", {"boxes": [[1, 1, 9, 9], [10, 10, 20, 20]]})["outlines"]
+        assert [o["box"] for o in auto] == [[1, 1, 9, 9], [10, 10, 20, 20]]
+        post("/api/auto/a.jpg", {"boxes": [[1, 1, 9, 9], [10, 10, 20, 20]]})
+        assert Fake.calls == 1  # second ask (prefetch, then the page) is served from the cache
         post("/api/item/a.jpg", {"status": "done", "boxes": [[1, 2, 3, 4], [5, 5, 9, 9]],
                                  "outlines": [[[1, 2], [3, 2], [3, 4]], None]})
         it = LabelStore(tmp_path).items["a.jpg"]
@@ -307,3 +317,73 @@ def test_pecking_head_moves_body_still(tmp_path):
     assert 8 <= len(standing) <= 12                            # ~10 pecks in 4 s
     assert len(pecks[pecks.frame >= 41]) == 0                  # walking: body moves, no pecks
     assert (standing["where"] == "feeder 1").all()
+
+
+def test_progress_file_and_dashboard_status(tmp_path):
+    import json
+    from chicken_tracker import progress as P
+    from chicken_tracker.dashboard import find_runs, run_status
+    run = tmp_path / "2026-11-02" / "143113-150338_ch04"
+    run.mkdir(parents=True)
+    (run / "detections.csv").write_text("frame\n")              # detect done (older run, no progress.json)
+    with P.Progress(run, "skeletons", total=100) as p:
+        p.update(40, force=True)
+        st = run_status(tmp_path, find_runs(tmp_path)[0])
+        sk = next(s for s in st["steps"] if s["key"] == "skeletons")
+        assert sk["state"] == "running" and sk["done"] == 40 and sk["total"] == 100
+    try:
+        with P.Progress(run, "pecks"):
+            raise ValueError("no poses")
+    except ValueError:
+        pass
+    st = run_status(tmp_path, run)
+    by = {s["key"]: s for s in st["steps"]}
+    assert by["detect"]["state"] == "done" and by["pieces"]["state"] == "todo"
+    assert by["skeletons"]["state"] == "done" and by["pecks"]["state"] == "failed"
+    assert "no poses" in by["pecks"]["error"]
+    assert st["date"] == "2026-11-02" and st["from"] == "14:31" and st["to"] == "15:03"
+
+
+def test_scan_for_hens_finds_padded_stretches(tmp_path):
+    import cv2
+    from chicken_tracker.tracking import TrackConfig, VideoInfo, scan_for_hens
+    fps, n = 10.0, 300                                    # 30 s; a hen in view from 12 s to 15 s
+    path = str(tmp_path / "v.avi")
+    vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"MJPG"), fps, (64, 48))
+    for f in range(n):
+        vw.write(np.full((48, 64, 3), 200 if 120 <= f < 150 else 20, np.uint8))
+    vw.release()
+
+    class Fake:   # "detector": a bright frame has a hen
+        def predict(self, img, **kw):
+            class R: pass
+            r = R(); r.boxes = [0] if img.mean() > 100 else []
+            return [r]
+    cfg = TrackConfig(scan_every_s=1.0, scan_pad_s=5.0)
+    spans = scan_for_hens(path, Fake(), cfg, VideoInfo(path, fps, 64, 48, n))
+    assert spans == [(70, 190)]                          # looks at 12,13,14 s -> 7..19 s
+
+
+def test_progress_accepts_numpy_numbers(tmp_path):
+    from chicken_tracker import progress as P
+    with P.Progress(tmp_path, "pecks") as p:
+        p.update(np.int64(5), np.int64(10), force=True)
+    assert P.read(tmp_path)["pecks"]["state"] == "done"
+    assert not list(tmp_path.glob("*.progress"))           # no temp files left behind
+
+
+def test_outline_boxes_falls_back_when_sam_grabs_too_much():
+    from chicken_tracker.outline import Outliner
+
+    class R:
+        def __init__(self, masks):
+            import torch
+            self.masks = type("M", (), {"data": torch.tensor(masks)})()
+
+    m_ok = np.zeros((100, 100), np.uint8); m_ok[10:30, 10:30] = 1
+    m_big = np.ones((100, 100), np.uint8)  # the whole yard
+    o = Outliner()
+    o._p = type("P", (), {"reset_image": lambda s: None, "set_image": lambda s, im: None,
+                          "__call__": lambda s, bboxes: [R(np.stack([m_ok, m_big]))]})()
+    out = o.outline_boxes("img.jpg", [[8, 8, 32, 32], [40, 40, 60, 60]])
+    assert out[0]["box"] == [10.0, 10.0, 30.0, 30.0] and out[1] is None
