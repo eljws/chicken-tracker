@@ -56,6 +56,34 @@ class Outliner:
         mask = r.masks.data[0].cpu().numpy().astype(np.uint8)
         return mask_to_outline(mask, points[0])
 
+    def outline_boxes(self, image: Path, boxes: list[list[float]]) -> list[dict | None]:
+        """One outline per suggested box (the box is SAM's prompt), in the same order.
+
+        Used to show a frame already outlined, so nothing needs clicking unless it's wrong.
+        """
+        if not boxes:
+            return []
+        with self._lock:
+            p = self._predictor()
+            if self._image != str(image):
+                p.reset_image()
+                p.set_image(str(image))
+                self._image = str(image)
+            r = p(bboxes=[[float(v) for v in b[:4]] for b in boxes])[0]
+        masks = [] if r.masks is None else r.masks.data.cpu().numpy().astype(np.uint8)
+        out = []
+        for i, b in enumerate(boxes):
+            o = mask_to_outline(masks[i], [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]) if i < len(masks) else None
+            # SAM sometimes grabs the whole yard or a sliver: then keep the suggested box as it was
+            if o is not None and not (0.5 <= _area(o["box"]) / max(_area(b), 1.0) <= 1.6):
+                o = None
+            out.append(o)
+        return out
+
+
+def _area(b) -> float:
+    return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
 
 def mask_to_outline(mask: np.ndarray, seed: list[float]) -> dict | None:
     """Keep the connected piece of the mask under (or nearest to) the first click."""

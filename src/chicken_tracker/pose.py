@@ -37,28 +37,33 @@ def run_pose(run_dir: Path, weights: Path, video: str | None = None, device: str
     model = YOLO(str(weights))
     rows = []
     total = meta["video"]["frame_count"]
-    for f, r in enumerate(model.predict(source=str(video), stream=True, conf=conf, imgsz=imgsz,
-                                        device=device, verbose=False)):
-        if progress and f % 1500 == 0:
-            print(f"  frame {f}/{total}", flush=True)
-        g = by_frame.get(f)
-        if g is None or r.keypoints is None or not len(r.boxes):
-            continue
-        pb = r.boxes.xyxy.cpu().numpy()
-        kp = r.keypoints.data.cpu().numpy()  # (n, K, 3): x, y, conf
-        nb = g[["x1", "y1", "x2", "y2"]].to_numpy()
-        iou = _iou_matrix(nb, pb)
-        used = set()
-        for i in np.argsort(-iou.max(1)):  # best matches first, one skeleton per hen
-            j = int(iou[i].argmax())
-            if iou[i, j] < min_iou or j in used:
+    from .progress import Progress
+    with Progress(run_dir, "skeletons", total=total) as prog:
+        for f, r in enumerate(model.predict(source=str(video), stream=True, conf=conf, imgsz=imgsz,
+                                            device=device, verbose=False)):
+            prog.update(f + 1)
+            if prog.preview_due() and r.keypoints is not None and len(r.boxes):
+                prog.preview(r.plot(line_width=2, kpt_radius=6))
+            if progress and f % 1500 == 0:
+                print(f"  frame {f}/{total}", flush=True)
+            g = by_frame.get(f)
+            if g is None or r.keypoints is None or not len(r.boxes):
                 continue
-            used.add(j)
-            row = {"frame": f, "track_id": int(g.track_id.iloc[i]), "chicken": g.chicken.iloc[i]}
-            for k, name in enumerate(KEYPOINTS):
-                row[f"{name}_x"], row[f"{name}_y"], row[f"{name}_c"] = (round(float(v), 1 if q < 2 else 2)
-                                                                     for q, v in enumerate(kp[j, k]))
-            rows.append(row)
+            pb = r.boxes.xyxy.cpu().numpy()
+            kp = r.keypoints.data.cpu().numpy()  # (n, K, 3): x, y, conf
+            nb = g[["x1", "y1", "x2", "y2"]].to_numpy()
+            iou = _iou_matrix(nb, pb)
+            used = set()
+            for i in np.argsort(-iou.max(1)):  # best matches first, one skeleton per hen
+                j = int(iou[i].argmax())
+                if iou[i, j] < min_iou or j in used:
+                    continue
+                used.add(j)
+                row = {"frame": f, "track_id": int(g.track_id.iloc[i]), "chicken": g.chicken.iloc[i]}
+                for k, name in enumerate(KEYPOINTS):
+                    row[f"{name}_x"], row[f"{name}_y"], row[f"{name}_c"] = (round(float(v), 1 if q < 2 else 2)
+                                                                         for q, v in enumerate(kp[j, k]))
+                rows.append(row)
     out = run_dir / "poses.csv"
     pd.DataFrame(rows).to_csv(out, index=False)
     (run_dir / "poses.json").write_text(json.dumps({"keypoints": KEYPOINTS, "skeleton": SKELETON,

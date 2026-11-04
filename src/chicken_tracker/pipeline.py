@@ -41,9 +41,19 @@ def process_video(video: Path, out_root: Path, track_cfg: TrackConfig, zones: Zo
     out_dir = out_root / video.stem
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    det, info = track_video(
-        video, track_cfg, annotated_out=out_dir / "annotated.mp4" if save_video else None
-    )
+    from .progress import Progress
+
+    with Progress(out_dir, "detect") as p:
+        def on_frame(f, total, r, phase="track"):
+            label = "quick scan for hens (once a second)" if phase == "scan" else (
+                "tracking the stretches with hens" if track_cfg.skip_empty else "")
+            p.update(f, total, phase=label)
+            if r is not None and p.preview_due():
+                p.preview(r.plot(line_width=3, font_size=1.2))  # the frame with the boxes found
+        det, info = track_video(
+            video, track_cfg, annotated_out=out_dir / "annotated.mp4" if save_video else None,
+            on_frame=on_frame,
+        )
     det.to_csv(out_dir / "detections.csv", index=False, float_format="%.2f")
     (out_dir / "meta.json").write_text(json.dumps(
         {"video": asdict(info), "track_config": asdict(track_cfg)}, indent=2

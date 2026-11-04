@@ -172,7 +172,8 @@ def _crop(img: np.ndarray, r) -> np.ndarray:
     return img[y1:y2, x1:x2]
 
 
-def _all_crops(run_dir: Path, det: pd.DataFrame, video: str, every_s: float, fps: float, out: Path) -> pd.DataFrame:
+def _all_crops(run_dir: Path, det: pd.DataFrame, video: str, every_s: float, fps: float, out: Path,
+               on_frame=None) -> pd.DataFrame:
     """1/s crop of every detection of every piece (named or not), written to `out`."""
     step = max(1, int(round(every_s * fps)))
     rows = det[det.frame % step == 0].copy()
@@ -191,6 +192,8 @@ def _all_crops(run_dir: Path, det: pd.DataFrame, video: str, every_s: float, fps
         f += 1
         if not ok:
             break
+        if on_frame is not None:
+            on_frame(int(target))
         for i, r in g.iterrows():
             p = out / f"t{int(r.track_id)}_f{int(r.frame)}_{i}.jpg"
             cv2.imwrite(str(p), _crop(img, r), [cv2.IMWRITE_JPEG_QUALITY, 92])
@@ -278,3 +281,134 @@ def load_predictions(run_dir: Path, det: pd.DataFrame) -> tuple[pd.DataFrame, li
     cur = key(det[["frame", "x1", "y1", "track_id"]])[["frame", "_x", "_y", "track_id"]]
     pred = key(pred).merge(cur.drop_duplicates(["frame", "_x", "_y"]), on=["frame", "_x", "_y"])
     return pred.drop(columns=["_x", "_y"]), classes
+
+
+# ------------------------------------------------------------------ naming a new day
+
+def predict_run(run_dir: Path, weights: Path, device: str | None = None, video: str | None = None,
+                every_s: float = 1.0) -> tuple[pd.DataFrame, list[str]]:
+    """Recogniser verdicts for 1/s crops of every piece of a run the model never saw.
+
+    Written in the same format as ``cross_fit`` (fold -1), so the Checks tab's recogniser
+    checks work on this run too.
+    """
+    from .identity import IdentityStore, load_detections
+
+    run_dir = Path(run_dir)
+    data = IdentityStore(run_dir).data
+    det = load_detections(run_dir, data)
+    from .progress import Progress
+
+    tmp = run_dir / "identity" / "rec_crops"
+    shutil.rmtree(tmp, ignore_errors=True)
+    last = int(det.frame.max()) if len(det) else 0
+    with Progress(run_dir, "naming", total=last) as prog:
+        prog.update(0, phase="cutting a crop per second of every piece", force=True)
+        crops = _all_crops(run_dir, det, video or data["video"], every_s, data["fps"], tmp,
+                           on_frame=lambda f: prog.update(f))
+        from .preview_img import crop_grid
+        prog.preview(crop_grid(crops.path.sample(min(40, len(crops)), random_state=0).tolist()), width=800)
+        prog.update(last, phase=f"recogniser on {len(crops)} crops", force=True)
+        P, classes = _predict(weights, crops.path.tolist(), device)
+        # the picture that matters: what the recogniser thinks each hen looks like
+        from .preview_img import hen_rows
+        lab = np.array(classes)[P.argmax(1)]
+        rows = {}
+        for c in classes:
+            sel = np.flatnonzero((lab == c) & (P.max(1) >= 0.6) & (crops.crowd.to_numpy() <= 0.3))
+            if len(sel):
+                pick = np.random.default_rng(0).choice(sel, min(10, len(sel)), replace=False)
+                rows[f"{c} ({(lab == c).sum()} crops)"] = [crops.path.iloc[i] for i in pick]
+        prog.preview(hen_rows(rows), width=1000)
+    shutil.rmtree(tmp, ignore_errors=True)
+    pred = pd.concat([crops.reset_index(drop=True).drop(columns=["path"]),
+                      pd.DataFrame(P, columns=[f"p_{c}" for c in classes])], axis=1)
+    pred["fold"] = -1
+    keep = ["frame", "x1", "y1", "x2", "y2", "track_id", "fold", "crowd"] + [f"p_{c}" for c in classes]
+    pred[keep].to_csv(run_dir / "identity" / PRED_FILE, index=False, float_format="%.4f")
+    (run_dir / "identity" / PRED_META).write_text(json.dumps(
+        {"classes": classes, "folds": 0, "weights": str(weights), "every_s": every_s,
+         "note": "full model on a run it never saw"}, indent=1))
+    return pred[keep], classes
+
+
+def assign_pieces(verdict: dict, frags: dict, classes: list[str], min_p: float = 0.15,
+                  several_p: float = 0.5) -> tuple[list[list[int]], list[int], dict]:
+    """verdict: {track: (mean probs over classes, n crops)} -> (tracks per hen, several pieces, report).
+
+    Most certain pieces first; each to the likeliest hen not already elsewhere at that time.
+    """
+    from .identity import _conflict
+
+    hens = [c for c in classes if c != SEVERAL]
+    tracks: list[list[int]] = [[] for _ in hens]
+    placed: list[list] = [[] for _ in hens]
+    several: list[int] = []
+    report = {"named": 0, "second_choice": 0, "several": 0, "conflict": 0}
+    for t in sorted(verdict, key=lambda t: -(verdict[t][0].max() * np.log1p(verdict[t][1]))):
+        if t not in frags:
+            continue
+        p = verdict[t][0]
+        if classes[int(p.argmax())] == SEVERAL and p.max() >= several_p:
+            several.append(t)
+            report["several"] += 1
+            continue
+        ranked = sorted(((float(p[classes.index(h)]), i) for i, h in enumerate(hens)), reverse=True)
+        choice = None
+        for k, (ph, i) in enumerate(ranked):
+            if k and ph < min_p:
+                break
+            if not _conflict([frags[t]], placed[i]):
+                choice = i
+                report["second_choice" if k else "named"] += 1
+                break
+        if choice is None:  # nobody free: keep the best guess, it shows up as a conflict
+            choice = ranked[0][1]
+            report["conflict"] += 1
+        placed[choice].append(frags[t])
+        tracks[choice].append(t)
+    return [sorted(t) for t in tracks], sorted(several), report
+
+
+def auto_name(run_dir: Path, weights: Path, device: str | None = None, video: str | None = None,
+              min_p: float = 0.15, several_p: float = 0.5) -> dict:
+    """Name every piece of a freshly built run with the recogniser.
+
+    Pieces are taken most-certain first; each goes to the most likely hen that isn't already
+    somewhere else at the same time (else her next most likely, down to ``min_p``). Pieces the
+    recogniser calls "several" are set aside. Pieces too short for a crop go to the nearest
+    hen by appearance. Nothing is marked as confirmed: the naming page still asks about doubtful
+    pieces, and conflicts / checks show what to look at.
+    """
+    from .identity import IdentityStore, export, load_fragments, place_piece, refresh_confidence
+
+    run_dir = Path(run_dir)
+    pred, classes = predict_run(run_dir, weights, device, video)
+    store = IdentityStore(run_dir)
+    data = store.data
+    frags = load_fragments(run_dir)
+    hens = [c for c in classes if c != SEVERAL]
+    cols = [f"p_{c}" for c in classes]
+    verdict = {}
+    for t, g in pred.groupby("track_id"):
+        clear = g[g.crowd <= 0.3]
+        p = (clear if len(clear) else g)[cols].mean().to_numpy()
+        verdict[int(t)] = (p, len(g))
+
+    tracks, several, report = assign_pieces(verdict, frags, classes, min_p, several_p)
+    data["chickens"] = [{"id": i, "name": h, "tracks": tracks[i]} for i, h in enumerate(hens)]
+    data["multiple"] = several
+    for key in ("rejected", "partial", "loose"):
+        data[key] = []
+    report["by_appearance"] = 0
+    for t in frags:  # pieces too short for a 1/s crop
+        if t not in verdict:
+            report["by_appearance"] += place_piece(data, frags, t) is not None
+    for c in data["chickens"]:
+        c["tracks"].sort()
+    data["answers"] = []
+    data["auto_named"] = {"weights": str(weights), **report}
+    refresh_confidence(data, frags)
+    store.save()
+    export(run_dir)
+    return report
