@@ -844,3 +844,47 @@ def export(run_dir: Path, max_hidden_s: float = 120.0, hidden_tau_s: float = 20.
     return {"chickens": len(summary), "timeline_segments": len(timeline),
             "not_chicken": len(data.get("rejected", [])), "multiple": len(data.get("multiple", [])),
             "conflicts": len(open_conflicts)}
+
+
+def clean_ghost_boxes(run_dir: Path) -> dict:
+    """Remove boxes drawn around two or more hens that also have their own boxes, from a run
+    that's already processed (and maybe named), without re-running detection.
+
+    detections.csv is filtered (the original is kept as detections_unfiltered.csv), skeletons and
+    pecks that sat on a ghost box are dropped, and everything is re-exported. Naming is kept:
+    names belong to pieces, and only the ghost box's own frames go.
+    """
+    from .tracking import container_box_index
+
+    run_dir = Path(run_dir)
+    raw = pd.read_csv(run_dir / "detections.csv")
+    gone = container_box_index(raw)
+    if not gone:
+        return {"ghost_boxes": 0}
+    keep_mask = ~raw.index.isin(gone)
+    kept = raw[keep_mask]
+    backup = run_dir / "detections_unfiltered.csv"
+    if not backup.exists():
+        raw.to_csv(backup, index=False, float_format="%.2f")
+    data = IdentityStore(run_dir).data
+    split = apply_splits(raw, data.get("splits", []))
+    ghosts = set(zip(split.track_id[~keep_mask].astype(int), split.frame[~keep_mask].astype(int)))
+    out = {"ghost_boxes": int((~keep_mask).sum())}
+    # skeletons / pecks on a ghost box: drop them (no video needed)
+    named_p, poses_p, pecks_p = run_dir / "detections_named.csv", run_dir / "poses.csv", run_dir / "pecks.csv"
+    if poses_p.exists():
+        poses = pd.read_csv(poses_p)
+        bad = [(int(t), int(f)) in ghosts for t, f in zip(poses.track_id, poses.frame)]
+        poses[[not b for b in bad]].to_csv(poses_p, index=False, float_format="%.2f")
+        out["skeletons_dropped"] = int(sum(bad))
+    if pecks_p.exists() and named_p.exists():
+        named = pd.read_csv(named_p)
+        on_ghost = {(c, int(f)) for c, f, t in zip(named.chicken, named.frame, named.track_id)
+                    if (int(t), int(f)) in ghosts}
+        pecks = pd.read_csv(pecks_p)
+        bad = [(c, int(f)) in on_ghost for c, f in zip(pecks.chicken, pecks.frame)]
+        pecks[[not b for b in bad]].to_csv(pecks_p, index=False)
+        out["pecks_dropped"] = int(sum(bad))
+    kept.to_csv(run_dir / "detections.csv", index=False, float_format="%.2f")
+    export(run_dir)
+    return out
