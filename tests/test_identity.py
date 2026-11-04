@@ -348,3 +348,27 @@ def test_assign_pieces_one_hen_in_one_place():
     tracks, several, rep = assign_pieces(verdict, fr, classes)
     assert tracks == [[2], [1, 3]] and several == [4]
     assert rep == {"named": 2, "second_choice": 1, "several": 1, "conflict": 0}
+
+
+def test_clean_ghost_boxes_keeps_naming(tmp_path, monkeypatch):
+    import json
+    import pandas as pd
+    from chicken_tracker import identity as I
+    rows = []
+    for f in range(3):  # hens 1 and 2, plus ghost 3 around both in every frame
+        rows += [(f, f / 10, 1, 10, 10, 30, 30, 20, 20, .9, 0), (f, f / 10, 2, 32, 10, 52, 30, 42, 20, .9, 0),
+                 (f, f / 10, 3, 8, 8, 54, 32, 31, 20, .6, 0)]
+    cols = ["frame", "time_s", "track_id", "x1", "y1", "x2", "y2", "cx", "cy", "conf", "cls"]
+    pd.DataFrame(rows, columns=cols).to_csv(tmp_path / "detections.csv", index=False)
+    pd.DataFrame({"frame": [0, 0], "track_id": [1, 3], "chicken": ["Salt", "Salt"]}).to_csv(tmp_path / "poses.csv", index=False)
+    pd.DataFrame({"frame": [1, 1], "track_id": [3, 1], "chicken": ["Rocky", "Salt"]}).to_csv(tmp_path / "detections_named.csv", index=False)
+    pd.DataFrame({"chicken": ["Rocky", "Salt"], "frame": [1, 1]}).to_csv(tmp_path / "pecks.csv", index=False)
+    (tmp_path / "identity").mkdir()
+    (tmp_path / "identity" / "identity.json").write_text(json.dumps({"splits": []}))
+    exported = []
+    monkeypatch.setattr(I, "export", lambda run_dir: exported.append(run_dir))
+    r = I.clean_ghost_boxes(tmp_path)
+    assert r == {"ghost_boxes": 3, "skeletons_dropped": 1, "pecks_dropped": 1} and exported
+    assert set(pd.read_csv(tmp_path / "detections.csv").track_id) == {1, 2}
+    assert len(pd.read_csv(tmp_path / "detections_unfiltered.csv")) == 9
+    assert list(pd.read_csv(tmp_path / "pecks.csv").chicken) == ["Salt"]

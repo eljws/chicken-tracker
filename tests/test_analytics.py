@@ -442,3 +442,40 @@ def test_outline_boxes_clips_to_checked_box():
                           "__call__": lambda s, bboxes: [R(np.stack([spill, merged]))]})()
     out = o.outline_boxes("img.jpg", [[10, 10, 30, 30], [40, 40, 64, 60]], clip=True)
     assert out[0]["box"][2] <= 31 and out[1] is None
+
+
+def test_drop_container_boxes():
+    import pandas as pd
+    from chicken_tracker.tracking import DETECTION_COLUMNS, drop_container_boxes
+    rows = [  # frame 0: two hens + a box around both (ghost); frame 1: one box for two pressed hens (kept)
+        (0, 0, 1, 10, 10, 30, 30, 20, 20, .9, 0), (0, 0, 2, 32, 10, 52, 30, 42, 20, .9, 0),
+        (0, 0, 3, 8, 8, 54, 32, 31, 20, .6, 0), (0, 0, 4, 200, 200, 220, 220, 210, 210, .9, 0),
+        (1, .1, 3, 8, 8, 54, 32, 31, 20, .6, 0), (1, .1, 4, 200, 200, 220, 220, 210, 210, .9, 0),
+    ]
+    out = drop_container_boxes(pd.DataFrame(rows, columns=DETECTION_COLUMNS))
+    assert sorted(out[out.frame == 0].track_id) == [1, 2, 4]
+    assert sorted(out[out.frame == 1].track_id) == [3, 4]
+
+
+def test_track_video_without_skip_empty(tmp_path, monkeypatch):
+    """The plain (whole-video) path returns detections - guards against it going missing again."""
+    import cv2, sys, types, torch
+    from chicken_tracker.tracking import TrackConfig, track_video
+    vid = tmp_path / "v.mp4"
+    w = cv2.VideoWriter(str(vid), cv2.VideoWriter_fourcc(*"mp4v"), 10, (64, 48))
+    for _ in range(5):
+        w.write(np.zeros((48, 64, 3), np.uint8))
+    w.release()
+
+    class Boxes:
+        xyxy = torch.tensor([[1., 2., 11., 12.]]); id = torch.tensor([7]); conf = torch.tensor([.8]); cls = torch.tensor([0])
+
+    class Fake:
+        names = {0: "chicken"}
+        def __init__(self, *a, **k): pass
+        def track(self, source=None, stream=False, **k):
+            return iter([types.SimpleNamespace(boxes=Boxes(), plot=lambda **_: None) for _ in range(5)])
+
+    monkeypatch.setitem(sys.modules, "ultralytics", types.SimpleNamespace(YOLO=Fake))
+    det, info = track_video(vid, TrackConfig(model="x.pt", classes=None), progress=False)
+    assert len(det) == 5 and set(det.track_id) == {7}

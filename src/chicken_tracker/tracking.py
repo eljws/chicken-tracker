@@ -10,6 +10,7 @@ from importlib import resources
 from pathlib import Path
 
 import cv2
+import numpy as np
 import pandas as pd
 
 DETECTION_COLUMNS = [
@@ -164,62 +165,7 @@ def track_video(
         finally:
             if writer is not None:
                 writer.release()
-        return pd.DataFrame(rows, columns=DETECTION_COLUMNS), info
-
-
-def _track_segments(path, model, cfg, info, classes, rows, writer, on_frame, progress) -> None:
-    """Scan, then track only the stretches with hens. The tracker restarts in each stretch;
-    its ids are offset so pieces from different stretches never share an id."""
-    phase = {"name": "scan"}
-
-    def report(f, total, r):
-        if on_frame is not None:
-            on_frame(f, total, r, phase["name"])
-
-    spans = scan_for_hens(path, model, cfg, info, classes, on_frame=report)
-    kept = sum(b - a + 1 for a, b in spans)
-    if progress:
-        print(f"  hens in view in {len(spans)} stretches, {kept}/{info.frame_count} frames "
-              f"({100 * kept / max(1, info.frame_count):.0f}%) - tracking only those", flush=True)
-    phase["name"] = "track"
-    phase["kept"] = kept
-    cap = cv2.VideoCapture(str(path))
-    f, k, offset, max_id, done = 0, 0, 0, 0, 0
-    try:
-        while k < len(spans):
-            a, b = spans[k]
-            if f < a:  # skip to the stretch (decoding only)
-                if not cap.grab():
-                    break
-                f += 1
-                continue
-            ok, img = cap.read()
-            if not ok:
-                break
-            r = model.track(img, persist=f != a, tracker=cfg.tracker, classes=classes, conf=cfg.conf,
-                            iou=cfg.iou, imgsz=cfg.imgsz, device=cfg.device, verbose=False)[0]
-            t = f / info.fps
-            boxes = r.boxes
-            if boxes is not None and boxes.id is not None:
-                for (x1, y1, x2, y2), tid, c, cl in zip(boxes.xyxy.cpu().numpy(), boxes.id.int().cpu().numpy(),
-                                                          boxes.conf.cpu().numpy(), boxes.cls.int().cpu().numpy()):
-                    tid = int(tid) + offset
-                    max_id = max(max_id, tid)
-                    rows.append((f, t, tid, float(x1), float(y1), float(x2), float(y2),
-                                 float((x1 + x2) / 2), float((y1 + y2) / 2), float(c), int(cl)))
-            if writer is not None:
-                writer.write(r.plot(line_width=2))
-            done += 1
-            if on_frame is not None:
-                on_frame(done, kept, r, "track")
-            if progress and done % 500 == 0:
-                print(f"  tracked {done}/{kept} frames with hens (video frame {f})", flush=True)
-            f += 1
-            if f > b:          # stretch finished: next one starts a fresh tracker with new ids
-                k += 1
-                offset = max_id
-    finally:
-        cap.release()
+        return drop_container_boxes(pd.DataFrame(rows, columns=DETECTION_COLUMNS)), info
     results = model.track(
         source=str(path),
         stream=True,
@@ -259,7 +205,7 @@ def _track_segments(path, model, cfg, info, classes, rows, writer, on_frame, pro
         if writer is not None:
             writer.release()
 
-    return pd.DataFrame(rows, columns=DETECTION_COLUMNS), info
+    return drop_container_boxes(pd.DataFrame(rows, columns=DETECTION_COLUMNS)), info
 
 
 def _track_segments(path, model, cfg, info, classes, rows, writer, on_frame, progress) -> None:
@@ -315,3 +261,31 @@ def _track_segments(path, model, cfg, info, classes, rows, writer, on_frame, pro
                 offset = max_id
     finally:
         cap.release()
+
+def drop_container_boxes(det: pd.DataFrame, inside: float = 0.7, bigger: float = 1.3) -> pd.DataFrame:
+    """Drop boxes drawn around two or more hens that also have their own boxes in that frame.
+
+    A box counts as one if at least two other boxes of the frame lie mostly (``inside``) within
+    it and it is clearly (``bigger``) larger than them. Both hens are already tracked, so the
+    big box is a ghost: an extra "hen", wrong speeds, a blob for skeletons. A box standing in
+    for two hens pressed together (no smaller boxes inside) is kept - it's the only trace of them.
+    """
+    drop = container_box_index(det, inside, bigger)
+    return det.drop(index=drop).reset_index(drop=True) if drop else det
+
+
+def container_box_index(det: pd.DataFrame, inside: float = 0.7, bigger: float = 1.3) -> list:
+    """Index labels of the rows ``drop_container_boxes`` removes."""
+    drop = []
+    for _, g in det.groupby("frame", sort=False):
+        if len(g) < 3:
+            continue
+        b = g[["x1", "y1", "x2", "y2"]].to_numpy()
+        a = (b[:, 2] - b[:, 0]) * (b[:, 3] - b[:, 1])
+        w = np.clip(np.minimum(b[:, None, 2], b[None, :, 2]) - np.maximum(b[:, None, 0], b[None, :, 0]), 0, None)
+        h = np.clip(np.minimum(b[:, None, 3], b[None, :, 3]) - np.maximum(b[:, None, 1], b[None, :, 1]), 0, None)
+        share = w * h / np.maximum(a[None, :], 1e-9)        # [i, j]: share of box j inside box i
+        np.fill_diagonal(share, 0)
+        n = ((share >= inside) & (a[:, None] > bigger * a[None, :])).sum(1)
+        drop.extend(g.index[n >= 2])
+    return drop

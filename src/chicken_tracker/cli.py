@@ -177,6 +177,12 @@ def cmd_pecks(a: argparse.Namespace) -> None:
     print(write_pecking(a.run_dir, video=str(a.video) if a.video else None))
 
 
+def cmd_clean(a: argparse.Namespace) -> None:
+    from .identity import clean_ghost_boxes
+
+    print(clean_ghost_boxes(a.run_dir))
+
+
 def cmd_dashboard(a: argparse.Namespace) -> None:
     from .dashboard import serve
 
@@ -311,6 +317,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--with-objects", action="store_true",
                    help="also learn feeder/water (needs the objects pass on most frames)")
     p.set_defaults(func=cmd_train)
+
+    p = sub.add_parser("clean", help="remove boxes around 2+ hens from a processed run (keeps naming)")
+    p.add_argument("run_dir", type=Path)
+    p.set_defaults(func=cmd_clean)
 
     p = sub.add_parser("outline", help="SAM outlines for reviewed hens that only have boxes (for `train --seg`)")
     p.add_argument("dataset", type=Path, nargs="?", default=Path("dataset"))
