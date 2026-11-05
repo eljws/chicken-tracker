@@ -14,3 +14,4 @@ mobileclip*.ts
 dataset_id/
 recognizer_runs/
 records/
+experiments/

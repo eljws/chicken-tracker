@@ -400,13 +400,14 @@ def chicken_of(data: dict) -> dict[int, int]:
 
 # Pieces excluded from every chicken, by reason. Both lists are kept so the detector
 # can be retrained on them: "multiple" = one box around 2+ birds (should be split),
-# "not_chicken" = false detection (should be background).
-EXCLUDED = ("not_chicken", "multiple")
-EXCLUDED_KEYS = {"not_chicken": "rejected", "multiple": "multiple"}
+# "not_chicken" = false detection (should be background), "unsure" = a hen, but too little of
+# her is visible to tell which (not counted for anyone, never asked about again).
+EXCLUDED = ("not_chicken", "multiple", "unsure")
+EXCLUDED_KEYS = {"not_chicken": "rejected", "multiple": "multiple", "unsure": "unsure"}
 
 
 def excluded(data: dict) -> set[int]:
-    return set(data.get("rejected", [])) | set(data.get("multiple", []))
+    return set().union(*(data.get(k, []) for k in EXCLUDED_KEYS.values()))
 
 
 # Box-quality flags: the piece IS that chicken, but its box is off. It still counts for the
@@ -549,9 +550,7 @@ def load_detections(run_dir: Path, data: dict | None = None) -> pd.DataFrame:
 
 def register_split(data: dict, det: pd.DataFrame, track: int, at_frame: int) -> tuple[int, pd.DataFrame]:
     """Record a cut in `data` (membership, exclusions, answers) and return (new id, new det)."""
-    rows = det[det.track_id == track]
-    if not ((rows.frame < at_frame).any() and (rows.frame >= at_frame).any()):
-        raise ValueError("the cut must fall inside the piece")
+    check_cut(det, track, at_frame)
     used = {int(t) for t in data["fragments"]} | {s["new"] for s in data.get("splits", [])}
     nid = max(SPLIT_ID_BASE, max(used) + 1)
     split = {"track": int(track), "at_frame": int(at_frame), "new": nid}
@@ -625,9 +624,66 @@ def strip_frames(det: pd.DataFrame, track: int, n: int = 12) -> list[int]:
     return [int(frames[i]) for i in idx]
 
 
+def gap_frames(det: pd.DataFrame, track: int, f0: int, f1: int, n: int = 10) -> list[int]:
+    """Up to n of the piece's frames from f0 to f1 (both ends included), spread evenly: to zoom
+    into the gap between two filmstrip pictures and find where the bird changes."""
+    frames = np.sort(det.loc[(det.track_id == track) & (det.frame >= f0) & (det.frame <= f1), "frame"].to_numpy())
+    if not len(frames):
+        return []
+    idx = np.unique(np.linspace(0, len(frames) - 1, min(n, len(frames))).round().astype(int))
+    return [int(frames[i]) for i in idx]
+
+
+MIN_CUT_FRAMES = 5  # a cut must leave at least this many frames on each side (~1/3 s)
+
+
+def check_cut(det: pd.DataFrame, track: int, at_frame: int, min_frames: int = 1) -> None:
+    rows = det.loc[det.track_id == track, "frame"]
+    if rows.empty:
+        raise ValueError(f"piece #{track} doesn't exist any more (reload the page)")
+    if not ((rows < at_frame).any() and (rows >= at_frame).any()):
+        raise ValueError("the cut must fall inside the piece (it may have been cut already: reload the page)")
+    before, after = int((rows < at_frame).sum()), int((rows >= at_frame).sum())
+    if min(before, after) < min_frames:
+        end = "start" if before < after else "end"
+        raise ValueError(f"Not cut: that would split off only {min(before, after)} frame(s) at the {end} of the piece. "
+                         f"If the picture there shows just part of a hen, she's coming into or leaving the view - "
+                         f"no cut needed. Cut where the bird actually changes.")
+
+
+def mark_segments(det: pd.DataFrame, track: int, marks: list[tuple[int, str]]) -> tuple[list[int], list[str]]:
+    """From filmstrip pictures marked with answers [(frame, label), ...] to (cut frames, label per part).
+
+    Neighbouring pictures with the same label are one part. Where the label changes, the cut goes
+    half way (by frames) between the two pictures - the change happened somewhere in that gap.
+    Every part must keep at least MIN_CUT_FRAMES frames.
+    """
+    marks = sorted((int(f), str(l)) for f, l in marks)
+    if not marks:
+        raise ValueError("nothing marked")
+    frames = np.sort(det.loc[det.track_id == track, "frame"].to_numpy())
+    if not len(frames):
+        raise ValueError(f"piece #{track} doesn't exist any more (reload the page)")
+    labels, cuts = [marks[0][1]], []
+    for (fa, la), (fb, lb) in zip(marks, marks[1:]):
+        if lb == labels[-1]:
+            continue
+        between = frames[(frames > fa) & (frames <= fb)]
+        cuts.append(int(between[len(between) // 2]) if len(between) else int(fb))
+        labels.append(lb)
+    edges = [frames[0]] + cuts + [frames[-1] + 1]
+    for a, b in zip(edges, edges[1:]):
+        if ((frames >= a) & (frames < b)).sum() < MIN_CUT_FRAMES:
+            raise ValueError("One marked part would be only a few frames long. Mark at least a couple of "
+                             "pictures in a row with the same answer, or answer the whole piece instead.")
+    return cuts, labels
+
+
 def piece_frame(video: str, det: pd.DataFrame, track: int, frame: int, fps: float,
-                margin: int = 90, height: int = 170) -> bytes | None:
-    """JPEG of the piece's box at one frame, with surroundings, for filmstrips."""
+                margin: int = 90, height: int = 170, wide: bool = False) -> bytes | None:
+    """JPEG of the piece's box at one frame, with surroundings, for filmstrips.
+    wide: much more of the yard around it, the other hens' boxes in grey and the time to 0.1 s
+    (the zoom used to find where a piece changes bird)."""
     r = det[(det.track_id == track) & (det.frame == frame)]
     if r.empty:
         return None
@@ -640,12 +696,16 @@ def piece_frame(video: str, det: pd.DataFrame, track: int, frame: int, fps: floa
         return None
     H, W = img.shape[:2]
     p1, p2 = (int(r.x1), int(r.y1)), (int(r.x2), int(r.y2))
+    if wide:
+        margin, height = max(260, int(1.5 * max(p2[0] - p1[0], p2[1] - p1[1]))), 300
+        for o in det[(det.frame == frame) & (det.track_id != track)].itertuples():
+            cv2.rectangle(img, (int(o.x1), int(o.y1)), (int(o.x2), int(o.y2)), (160, 160, 160), 1)
     cv2.rectangle(img, p1, p2, (0, 0, 0), 5)
     cv2.rectangle(img, p1, p2, (255, 255, 255), 2)
     crop = img[max(0, p1[1] - margin):min(H, p2[1] + margin), max(0, p1[0] - margin):min(W, p2[0] + margin)]
     out = cv2.resize(crop, (int(crop.shape[1] * height / crop.shape[0]), height))
     t = int(frame / fps)
-    lab = f"{t // 60:02d}:{t % 60:02d}"
+    lab = f"{t // 60:02d}:{t % 60:02d}" + (f".{int(10 * frame / fps) % 10}" if wide else "")
     cv2.putText(out, lab, (5, height - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 4, cv2.LINE_AA)
     cv2.putText(out, lab, (5, height - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
     return cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes()
@@ -854,7 +914,7 @@ def export(run_dir: Path, max_hidden_s: float = 120.0, hidden_tau_s: float = 20.
     pd.DataFrame(flagged, columns=["track_id", "reason", "chicken"]).to_csv(run_dir / "flagged_pieces.csv", index=False)
     return {"chickens": len(summary), "timeline_segments": len(timeline),
             "not_chicken": len(data.get("rejected", [])), "multiple": len(data.get("multiple", [])),
-            "conflicts": len(open_conflicts)}
+            "unsure": len(data.get("unsure", [])), "conflicts": len(open_conflicts)}
 
 
 def clean_ghost_boxes(run_dir: Path) -> dict:

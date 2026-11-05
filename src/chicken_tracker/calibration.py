@@ -148,7 +148,8 @@ def kinematics(det, H: np.ndarray, window_s: float = 0.5, vmax: float = 5.0, smo
         a_all += [(tt, aa, tid) for tt, aa in zip(tv[h:-h], a) if not np.isnan(aa)]
     out = {"top_speed_m_s": np.nan, "top_speed_at_s": np.nan, "top_speed_piece": None,
            "brisk_speed_m_s": np.nan, "top_accel_m_s2": np.nan, "top_accel_at_s": np.nan,
-           "top_accel_piece": None, "moments": []}
+           "top_accel_piece": None, "moments": [],
+           "samples": v_all}  # (time_s, speed m/s, track) every frame with a valid speed
     if v_all:
         tv, vv, tid = max(v_all, key=lambda x: x[1])
         out.update(top_speed_m_s=vv, top_speed_at_s=tv, top_speed_piece=int(tid),
