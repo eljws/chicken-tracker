@@ -110,31 +110,35 @@ def build_id_dataset(run_dir: Path, out: Path, video: str | None = None, every_s
 
 
 def train_recognizer(dataset: Path, model: str = "yolo11s-cls.pt", epochs: int = 40, imgsz: int = 224,
-                     device: str | None = None, batch: int = 64, lr0: float = 0.002) -> Path:
+                     device: str | None = None, batch: int = 64, lr0: float = 0.002, name: str = "hens",
+                     project: Path | None = None, note: str = "", trained_on: dict | None = None) -> Path:
+    """Train, then register the model (records/). `project` is the folder holding records/ and
+    recognizer_runs/ (default: the dataset's parent folder)."""
     from ultralytics import YOLO
 
     from . import records
 
     dataset = Path(dataset).resolve()
-    rec = dataset.parent / "records"
+    project = Path(project).resolve() if project else dataset.parent
+    rec = project / "records"
     try:
-        info = records.backup(dataset.parent, reason="before training recogniser")
+        info = records.backup(project, reason="before training recogniser")
         print(f"Backup before training: {info['path']} ({info['copied']} files copied, {info['linked']} unchanged)")
     except Exception as e:
         print(f"WARNING: backup before training failed: {e}")
-    runs = dataset.parent / "recognizer_runs"
+    runs = project / "recognizer_runs"
     YOLO(model).train(data=str(dataset), epochs=epochs, imgsz=imgsz, batch=batch, device=device,
-                      project=str(runs), name="hens", exist_ok=True, patience=15, plots=False,
+                      project=str(runs), name=name, exist_ok=True, patience=15, plots=False,
                       # SGD (AdamW diverged on small data before); low lr: lr0=0.01 made val accuracy
                       # swing 59-94% between epochs on ~3k crops
                       optimizer="SGD", lr0=lr0, cos_lr=True,
                       fliplr=0.5, flipud=0.0, hsv_h=0.0)  # no hue jitter: colour IS the identity
-    best = runs / "hens" / "weights" / "best.pt"
+    best = runs / name / "weights" / "best.pt"
     if best.exists():
-        version = records.register("recognizer", best, version=f"hens-{time.strftime('%Y%m%d-%H%M')}",
+        version = records.register("recognizer", best, version=f"{name}-{time.strftime('%Y%m%d-%H%M')}",
                                    parent=records.version_of("recognizer", model, root=rec),
                                    trained_on={"dataset": str(dataset), "epochs": epochs, "imgsz": imgsz,
-                                               "start": str(model)}, root=rec)
+                                               "start": str(model), **(trained_on or {})}, note=note, root=rec)
         print(f"Registered as recognizer {version}. Use it with: chicken-tracker models --use recognizer {version}")
     return best
 
@@ -414,7 +418,7 @@ def auto_name(run_dir: Path, weights: Path, device: str | None = None, video: st
     tracks, several, report = assign_pieces(verdict, frags, classes, min_p, several_p)
     data["chickens"] = [{"id": i, "name": h, "tracks": tracks[i]} for i, h in enumerate(hens)]
     data["multiple"] = several
-    for key in ("rejected", "partial", "loose"):
+    for key in ("rejected", "unsure", "partial", "loose"):
         data[key] = []
     report["by_appearance"] = 0
     for t in frags:  # pieces too short for a 1/s crop

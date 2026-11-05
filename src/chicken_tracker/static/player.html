@@ -172,7 +172,11 @@ function resize() {
   draw();
 }
 window.addEventListener("resize", () => { resize(); buildTimeline(); });
-v.addEventListener("loadedmetadata", () => { document.getElementById("loading").remove(); resize(); });
+v.addEventListener("loadedmetadata", () => {
+  document.getElementById("loading").remove(); resize();
+  const t = /[#&]t=([\d.]+)/.exec(location.hash);  // player/#t=123.4 opens a moment (e.g. a run from Metrics)
+  if (t) seek(Math.max(0, +t[1] - 2));
+});
 
 function boxesAt(f) {
   const a = D.frames[f]; const out = [];

@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Chicken metrics</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --page: #141414; --surface: #1d1d1d; --border: rgba(255,255,255,0.10);
+    --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781; --grid: #2c2c2a; --axis: #383835;
+    /* hen colours: fixed per hen on every chart (validated for colour-blind separation in this order) */
+    --Monster: #3987e5; --Ginger: #d95926; --Rocky: #199e70; --Salt: #c98500; --Pepper: #d55181;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 10px 18px; background: #1f1f1f; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 18px; }
+  header a { color: var(--ink2); }
+  .days { display: flex; gap: 6px; flex-wrap: wrap; }
+  .days button { background: #2a2a2a; color: var(--ink2); border: 1px solid transparent; border-radius: 6px; padding: 4px 10px; cursor: pointer; font: inherit; }
+  .days button.sel { border-color: var(--ink2); color: var(--ink); font-weight: 600; }
+  main { padding: 14px 18px; display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); }
+  main.loading { opacity: .5; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; min-width: 0; }
+  .card.wide { grid-column: 1 / -1; }
+  .card h2 { margin: 0; font-size: 15px; }
+  .card .sub { color: var(--muted); font-size: 12px; margin: 2px 0 8px; }
+  .kpis { display: flex; gap: 28px; flex-wrap: wrap; }
+  .kpi .v { font-size: 30px; font-weight: 600; }
+  .kpi .l { color: var(--ink2); font-size: 12px; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--ink2); margin-bottom: 4px; }
+  .legend i { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin-right: 5px; border-radius: 1px; }
+  .legend i.dot { width: 8px; height: 8px; border-radius: 50%; }
+  svg { display: block; width: 100%; overflow: visible; }
+  svg text { fill: var(--muted); font-size: 11px; }
+  svg .lab { fill: var(--ink2); font-size: 12px; }
+  svg .val { fill: var(--ink); font-size: 12px; }
+  .hit { cursor: pointer; }
+  #tip { position: fixed; pointer-events: none; background: #262625; border: 1px solid var(--border); border-radius: 6px;
+         padding: 6px 9px; font-size: 12px; color: var(--ink2); display: none; z-index: 10; min-width: 120px; }
+  #tip b { color: var(--ink); font-size: 13px; }
+  #tip .row { display: flex; gap: 8px; align-items: center; }
+  #tip .row i { width: 12px; height: 2px; display: inline-block; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { padding: 5px 8px; text-align: right; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
+  th { color: var(--muted); font-weight: 500; }
+  th:first-child, td:first-child { text-align: left; }
+  td .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .empty { color: var(--muted); padding: 40px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📊 Metrics</h1>
+  <div class="days" id="days"></div>
+  <span class="sub" id="cover" style="color:var(--muted)"></span>
+  <a href="../" style="margin-left:auto">← home</a>
+</header>
+<main id="main"><div class="empty">Loading…</div></main>
+<div id="tip"></div>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const css = getComputedStyle(document.documentElement);
+const colour = h => css.getPropertyValue("--" + h).trim() || "#9a9a95";
+const clock = s => { s = Math.round(s); return `${String(Math.floor(s / 3600)).padStart(2, "0")}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}`; };
+const clockS = s => clock(s) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
+const NS = "http://www.w3.org/2000/svg";
+let M = null, day = decodeURIComponent(location.hash.slice(1)) || "";
+
+const tip = $("#tip");
+function showTip(e, html) { tip.innerHTML = html; tip.style.display = "block";
+  const x = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8), y = Math.min(e.clientY + 14, innerHeight - tip.offsetHeight - 8);
+  tip.style.left = x + "px"; tip.style.top = y + "px"; }
+function hideTip() { tip.style.display = "none"; }
+
+function el(tag, attrs, parent) { const n = document.createElementNS(NS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]); if (parent) parent.appendChild(n); return n; }
+function txt(parent, x, y, s, cls, anchor = "start") { const t = el("text", { x, y, class: cls || "", "text-anchor": anchor }, parent); t.textContent = s; return t; }
+// axis: 4-5 round ticks from 0 that just cover the data
+const niceStep = v => { const p = 10 ** Math.floor(Math.log10(v)), f = v / p; return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p; };
+function axis(max, integer) { let step = niceStep(Math.max(max, 1e-9) / 4); if (integer) step = Math.max(1, Math.ceil(step));
+  const n = Math.max(1, Math.ceil(max / step)); return { max: n * step, ticks: [...Array(n + 1).keys()].map(i => i * step) }; }
+
+// ---------- horizontal bars: one per hen ----------
+function bars(card, key, unit, fmt = v => v.toFixed(0), integer = false) {
+  const W = card.clientWidth - 28, rowH = 30, left = 74, right = 70, H = M.hens.length * rowH + 22;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H }, card);
+  const ax = axis(Math.max(...M.hens.map(h => M.totals[h][key])), integer), max = ax.max, x = v => left + (W - left - right) * v / max;
+  ax.ticks.forEach((v, i) => {
+    el("line", { x1: x(v), x2: x(v), y1: 0, y2: H - 18, stroke: i ? "var(--grid)" : "var(--axis)" }, svg);
+    txt(svg, x(v), H - 4, fmt(v), "", "middle"); });
+  M.hens.forEach((h, i) => {
+    const v = M.totals[h][key], y = i * rowH + 6, bw = Math.max(0, x(v) - left);
+    txt(svg, left - 8, y + 13, h, "lab", "end");
+    // 4px rounded data-end, square at the baseline
+    const r = Math.min(4, bw / 2);
+    el("path", { d: `M${left},${y} h${bw - r} a${r},${r} 0 0 1 ${r},${r} v${18 - 2 * r} a${r},${r} 0 0 1 ${-r},${r} h${-(bw - r)} z`, fill: colour(h) }, svg);
+    txt(svg, left + bw + 6, y + 13, `${fmt(v)} ${unit}`, "val");
+    const hit = el("rect", { x: 0, y: y - 4, width: W, height: rowH, fill: "transparent", class: "hit" }, svg);
+    hit.onpointermove = e => showTip(e, `<b>${fmt(v)} ${esc(unit)}</b><br>${esc(h)}`);
+    hit.onpointerleave = hideTip;
+  });
+}
+
+// ---------- activity: metres per 10 min, one line per hen, gaps where there's no video ----------
+function activity(card) {
+  const bins = M.bins, step = M.bin_s;
+  if (!bins.length) return;
+  const W = card.clientWidth - 28, H = 240, L = 40, R = 12, T = 8, B = 24;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H }, card);
+  const t0 = bins[0], t1 = bins[bins.length - 1] + step;
+  const ax = axis(Math.max(...M.hens.flatMap(h => M.activity[h]), 1)), max = ax.max;
+  const x = t => L + (W - L - R) * (t - t0) / (t1 - t0), y = v => T + (H - T - B) * (1 - v / max);
+  ax.ticks.forEach((v, i) => {
+    el("line", { x1: L, x2: W - R, y1: y(v), y2: y(v), stroke: i ? "var(--grid)" : "var(--axis)" }, svg);
+    txt(svg, L - 6, y(v) + 4, v.toFixed(0), "", "end"); });
+  const hourStep = (t1 - t0) > 6 * 3600 ? 7200 : 3600;
+  for (let t = Math.ceil(t0 / hourStep) * hourStep; t <= t1; t += hourStep) txt(svg, x(t), H - 6, clock(t), "", "middle");
+  // shade stretches with no processed video, so "flat" isn't mistaken for "resting"
+  for (let i = 1; i < bins.length; i++) if (bins[i] - bins[i - 1] > step)
+    el("rect", { x: x(bins[i - 1] + step), y: T, width: x(bins[i]) - x(bins[i - 1] + step), height: H - T - B, fill: "#ffffff08" }, svg);
+  for (const h of M.hens) {
+    let d = "";
+    bins.forEach((b, i) => { const mid = b + step / 2, gap = i && bins[i] - bins[i - 1] > step;
+      d += `${!i || gap ? "M" : "L"}${x(mid).toFixed(1)},${y(M.activity[h][i]).toFixed(1)}`; });
+    el("path", { d, fill: "none", stroke: colour(h), "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+  }
+  const hair = el("line", { y1: T, y2: H - B, stroke: "var(--ink2)", "stroke-width": 1, visibility: "hidden" }, svg);
+  const dots = M.hens.map(h => el("circle", { r: 4, fill: colour(h), stroke: "var(--surface)", "stroke-width": 2, visibility: "hidden" }, svg));
+  const hit = el("rect", { x: L, y: 0, width: W - L - R, height: H - B, fill: "transparent" }, svg);
+  hit.onpointermove = e => {
+    const r = svg.getBoundingClientRect(), px = (e.clientX - r.left) * W / r.width;
+    const t = t0 + (px - L) / (W - L - R) * (t1 - t0);
+    let i = 0; bins.forEach((b, k) => { if (Math.abs(b + step / 2 - t) < Math.abs(bins[i] + step / 2 - t)) i = k; });
+    const cx = x(bins[i] + step / 2);
+    hair.setAttribute("x1", cx); hair.setAttribute("x2", cx); hair.setAttribute("visibility", "visible");
+    dots.forEach((c, k) => { c.setAttribute("cx", cx); c.setAttribute("cy", y(M.activity[M.hens[k]][i])); c.setAttribute("visibility", "visible"); });
+    showTip(e, `<div style="margin-bottom:3px">${clock(bins[i])}–${clock(bins[i] + step)}</div>` +
+      M.hens.map(h => `<div class="row"><i style="background:${colour(h)}"></i><b>${M.activity[h][i].toFixed(0)} m</b> ${esc(h)}</div>`).join(""));
+  };
+  hit.onpointerleave = () => { hideTip(); hair.setAttribute("visibility", "hidden"); dots.forEach(c => c.setAttribute("visibility", "hidden")); };
+}
+
+// ---------- runs: one row per hen, a dot per run at its time of day ----------
+function runsChart(card) {
+  const W = card.clientWidth - 28, rowH = 30, L = 110, R = 12, H = M.hens.length * rowH + 26;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H }, card);
+  const span = M.clips.length ? [M.clips[0].start_s, Math.max(...M.clips.map(c => c.end_s))] : [0, 86400];
+  const t0 = Math.floor(span[0] / 3600) * 3600, t1 = Math.ceil(span[1] / 3600) * 3600;
+  const x = t => L + (W - L - R) * (t - t0) / (t1 - t0);
+  // processed video as a faint band behind each row, so an empty stretch reads as "no video" vs "no runs"
+  for (const c of M.clips) el("rect", { x: x(c.start_s), y: 0, width: Math.max(1, x(c.end_s) - x(c.start_s)), height: H - 22, fill: "#ffffff0a" }, svg);
+  const hourStep = (t1 - t0) > 6 * 3600 ? 7200 : 3600;
+  for (let t = t0; t <= t1; t += hourStep) { el("line", { x1: x(t), x2: x(t), y1: 0, y2: H - 22, stroke: "var(--grid)" }, svg);
+    txt(svg, x(t), H - 6, clock(t), "", "middle"); }
+  const maxPeak = Math.max(...M.runs.map(r => r.peak_m_s), 1);
+  M.hens.forEach((h, i) => {
+    const cy = i * rowH + 15, mine = M.runs.filter(r => r.hen === h);
+    el("line", { x1: L, x2: W - R, y1: cy, y2: cy, stroke: "var(--grid)" }, svg);
+    txt(svg, L - 10, cy + 4, `${h} · ${mine.length}`, "lab", "end");
+    for (const r of mine) {
+      const c = el("circle", { cx: x(r.clock_s), cy, r: 4 + 3 * (r.peak_m_s - M.run_threshold_m_s) / Math.max(0.1, maxPeak - M.run_threshold_m_s),
+                               fill: colour(h), stroke: "var(--surface)", "stroke-width": 2 }, svg);
+      // 24px hit area, bigger than the dot
+      const hit = el("circle", { cx: x(r.clock_s), cy, r: 12, fill: "transparent", class: "hit" }, svg);
+      hit.onpointermove = e => { c.setAttribute("stroke", "var(--ink)");
+        showTip(e, `<b>${r.peak_m_s.toFixed(1)} m/s</b> top speed<br>${esc(h)} · ${clockS(r.clock_s)}<br>` +
+          `${r.duration_s.toFixed(1)} s · ${r.metres.toFixed(1)} m<br><span style="color:var(--muted)">click: watch it</span>`); };
+      hit.onpointerleave = () => { c.setAttribute("stroke", "var(--surface)"); hideTip(); };
+      hit.onclick = () => window.open(`../run/${r.run.split("/").map(encodeURIComponent).join("/")}/player/#t=${r.start_s.toFixed(1)}`, "_blank");
+    }
+  });
+}
+
+function table(card) {
+  const cols = [["distance_m", "walked (m)", 0], ["m_per_min", "m / min seen", 1], ["visible_s", "seen (min)", 0, 1 / 60],
+                ["runs", "runs", 0], ["top_speed_m_s", "top speed (m/s)", 1], ["water_visits", "water visits", 0],
+                ["water_time_s", "at water (min)", 1, 1 / 60], ["pecks", "pecks", 0]];
+  card.insertAdjacentHTML("beforeend", `<table><tr><th>hen</th>${cols.map(c => `<th>${c[1]}</th>`).join("")}</tr>` +
+    M.hens.map(h => `<tr><td><span class="sw" style="background:${colour(h)}"></span>${esc(h)}</td>` +
+      cols.map(([k, , d, f]) => `<td>${(M.totals[h][k] * (f || 1)).toFixed(d)}</td>`).join("") + "</tr>").join("") + "</table>");
+}
+
+function card(title, sub, wide) {
+  const c = document.createElement("div"); c.className = "card" + (wide ? " wide" : "");
+  c.innerHTML = `<h2>${title}</h2><div class="sub">${sub}</div>`; $("#main").appendChild(c); return c;
+}
+const legend = (c, dot) => c.insertAdjacentHTML("beforeend", `<div class="legend">${M.hens.map(h =>
+  `<span><i class="${dot ? "dot" : ""}" style="background:${colour(h)}"></i>${esc(h)}</span>`).join("")}</div>`);
+
+function render() {
+  const main = $("#main"); main.classList.remove("loading"); main.innerHTML = "";
+  $("#days").innerHTML = M.days.map(d => `<button data-d="${d}" class="${d === M.day ? "sel" : ""}">${
+    new Date(d + "T12:00").toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" })}</button>`).join("");
+  document.querySelectorAll("#days button").forEach(b => b.onclick = () => { location.hash = b.dataset.d; });
+  if (!M.hens || !M.hens.length) { main.innerHTML = `<div class="empty">No named clips on this day yet. Metrics appear once a clip is named
+    (and its calibration is in place).</div>`; $("#cover").textContent = ""; return; }
+  const mins = M.clips.reduce((s, c) => s + (c.end_s - c.start_s), 0) / 60;
+  $("#cover").textContent = `${M.clips.length} named clip${M.clips.length > 1 ? "s" : ""} · ${Math.round(mins)} min of video · ` +
+    M.clips.map(c => `${clock(c.start_s)}–${clock(c.end_s)}`).join(", ");
+  const tot = k => M.hens.reduce((s, h) => s + M.totals[h][k], 0);
+  const k = card("The day so far", "all hens together, over the named clips", true);
+  k.insertAdjacentHTML("beforeend", `<div class="kpis">
+    <div class="kpi"><div class="v">${Math.round(tot("distance_m"))} m</div><div class="l">walked</div></div>
+    <div class="kpi"><div class="v">${tot("runs")}</div><div class="l">runs (≥ ${M.run_threshold_m_s} m/s)</div></div>
+    <div class="kpi"><div class="v">${Math.round(tot("pecks"))}</div><div class="l">pecks${M.clips.some(c => !c.pecks) ?
+      ` · counted in ${M.clips.filter(c => c.pecks).length} of ${M.clips.length} clips so far` : ""}</div></div>
+    <div class="kpi"><div class="v">${Math.round(mins)} min</div><div class="l">video covered</div></div></div>`);
+  bars(card("How far each hen walked", "metres, from her feet on the ground (box jitter smoothed out)"), "distance_m", "m");
+  bars(card("How many times each hen ran", `bursts of ≥ ${M.run_threshold_m_s} m/s lasting ≥ 0.4 s`), "runs", "runs", v => v.toFixed(0), true);
+  const a = card("Activity through the day", "metres walked per 10 minutes (a block only partly filmed is scaled up to 10 min) · lighter bands: no processed video", true);
+  legend(a); activity(a);
+  const r = card("Run events", "each dot is one run; bigger = faster · hover for details, click to watch it in the player " +
+    "(a tracker mix-up between two hens can look like a dash, so check the surprising ones)", true);
+  runsChart(r);
+  table(card("All numbers", "the same figures as the charts, per hen", true));
+}
+
+async function load() {
+  $("#main").classList.add("loading");
+  M = await (await fetch("api" + (day ? `?day=${encodeURIComponent(day)}` : ""))).json();
+  day = M.day; render();
+}
+addEventListener("hashchange", () => { day = decodeURIComponent(location.hash.slice(1)); load(); });
+let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => M && render(), 150); });
+load();
+</script>
+</body>
+</html>

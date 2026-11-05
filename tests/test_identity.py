@@ -382,3 +382,59 @@ def test_confirm_all_confirms_only_the_rest_of_the_row():
     assert I.confirmed(data) == {1, 2, 3}
     assert data["chickens"][0]["tracks"] == [1, 2, 3] and data["chickens"][1]["tracks"] == [4]
     assert I.confirm_all(data, 0) == 0
+
+
+def test_cant_tell_which_hen_is_set_aside_and_not_asked_again():
+    fr = {1: frag(1, 0, 10, A), 2: frag(2, 5, 15, A), 3: frag(3, 40, 50, A)}
+    d = _data(fr, [[1, 2, 3]])  # 1 and 2 overlap: a conflict
+    assert I.conflicts(d)
+    I.apply_answer(d, 2, None, "unsure")
+    assert d["unsure"] == [2] and 2 in I.excluded(d) and 2 in I.confirmed(d)
+    assert d["chickens"][0]["tracks"] == [1, 3] and not I.conflicts(d)
+    assert all(q["track"] != 2 for q in I.questions(d))
+    I.apply_answer(d, 2, 0, "moved")  # spotted her after all
+    assert d["unsure"] == [] and 2 in d["chickens"][0]["tracks"]
+
+
+def test_gap_frames_zoom_between_two_strip_pictures():
+    import pandas as pd
+    det = pd.DataFrame({"track_id": [7] * 100, "frame": range(100)})
+    strip = I.strip_frames(det, 7, 12)
+    f0, f1 = strip[-2], strip[-1]  # the last gap: cutting at f1 would move just the last frame
+    g = I.gap_frames(det, 7, f0, f1)
+    assert g[0] == f0 and g[-1] == f1 and len(g) == min(10, f1 - f0 + 1)
+    I.check_cut(det, 7, g[3])
+    with pytest.raises(ValueError):
+        I.check_cut(det, 7, 0)       # nothing before it
+    with pytest.raises(ValueError):
+        I.check_cut(det, 8, 50)      # no such piece
+    with pytest.raises(ValueError, match="only 1 frame"):
+        I.check_cut(det, 7, 99, I.MIN_CUT_FRAMES)  # just the last frame: the hen leaving the view, not a new bird
+
+
+def test_run_events_from_speed_samples():
+    from chicken_tracker.metrics import run_events
+    dt = 0.064
+    t = [i * dt for i in range(100)]
+    v = [0.2] * 100
+    for i in range(20, 35):          # ~1 s at 1.5 m/s with a one-frame dip: one run
+        v[i] = 1.5
+    v[27] = 0.6
+    for i in range(60, 63):          # 0.19 s: too short to be a run
+        v[i] = 2.0
+    ev = run_events([(tt, vv, 7) for tt, vv in zip(t, v)])
+    assert len(ev) == 1
+    assert ev[0]["peak_m_s"] == 1.5 and 0.9 < ev[0]["duration_s"] < 1.0 and ev[0]["piece"] == 7
+
+
+def test_mark_segments_cut_where_marks_change():
+    import pandas as pd
+    det = pd.DataFrame({"track_id": [3] * 200, "frame": range(100, 300)})
+    strip = I.strip_frames(det, 3, 20)
+    marks = [(f, "c0") for f in strip[:8]] + [(f, "unsure") for f in strip[8:12]] + [(f, "c1") for f in strip[12:]]
+    cuts, labels = I.mark_segments(det, 3, marks)
+    assert labels == ["c0", "unsure", "c1"] and len(cuts) == 2
+    assert strip[7] < cuts[0] <= strip[8] and strip[11] < cuts[1] <= strip[12]   # in the gap where it changes
+    assert I.mark_segments(det, 3, [(f, "c0") for f in strip]) == ([], ["c0"])  # all the same: no cut
+    with pytest.raises(ValueError, match="few frames"):
+        I.mark_segments(det, 3, [(f, "c0") for f in range(100, 299)] + [(299, "c2")])  # last part: 1 frame

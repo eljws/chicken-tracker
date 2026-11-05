@@ -49,7 +49,19 @@
          color: #666; font-size: 13px; border-radius: 4px; }
   .cut:hover { color: #111; background: #ffc107; }
   .gap { width: 4px; }
-  #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #333; padding: 8px 16px;
+  .brushes { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+  .brush { border-left: 6px solid var(--bc) !important; }
+  .brush.on { background: #4a4a4a; outline: 2px solid var(--bc); color: #fff; font-weight: 600; }
+  .paint { gap: 4px; user-select: none; }
+  .paint .pic { position: relative; cursor: crosshair; border: 3px solid var(--mc, transparent); border-radius: 6px; }
+  .paint .pic img { display: block; }
+  .paint .pic .tag { position: absolute; left: 0; right: 0; bottom: 0; font-size: 11px; text-align: center; color: #fff;
+                     background: color-mix(in srgb, var(--mc) 85%, transparent); white-space: nowrap; overflow: hidden; }
+  .paint .pic:not(.marked) .tag { display: none; }
+  #zoom { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.75); z-index: 50; align-items: center; justify-content: center; }
+  #zoom .zbox { background: #1d1d1d; border: 1px solid #444; border-radius: 8px; padding: 12px; max-width: 96vw; overflow-x: auto; }
+  #zoom h3 { display: flex; gap: 10px; align-items: center; margin: 0 0 8px; }
+  #toast { z-index: 60; position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #333; padding: 8px 16px;
            border-radius: 6px; opacity: 0; transition: opacity .3s; }
 </style>
 </head>
@@ -75,30 +87,55 @@ const img = n => `crop/${encodeURIComponent(n)}`;
 async function api(path, body) {
   const r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" },
                                        body: JSON.stringify(body) } : {});
-  const j = await r.json();
-  if (j.error) { toast(j.error); return; }
-  S = j; render();
+  let j;
+  try { j = await r.json(); } catch (e) { toast(`Something went wrong (${r.status}) — see the server window`, 5000); return false; }
+  if (j.error) { toast(j.error, 5000); return false; }
+  S = j; render(); return true;
 }
 const clockOf = s => { const t = Math.round(s); return `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`; };
 // filmstrip of a piece across its whole life; ✂ between frames cuts the piece there
-function film(p, h = 120, cuttable = true) {
+function film(p, h = 120, cuttable = true, zoomed = false) {
   return `<div class="film">${p.strip.map((f, i) =>
-    (i ? (cuttable ? `<span class="cut" data-t="${p.track}" data-f="${f}" title="cut piece here">✂</span>` : '<span class="gap"></span>') : "") +
-    `<img src="strip/${p.track}/${f}.jpg?v=${S.version}" style="height:${h}px">`).join("")}</div>`;
+    (i ? (cuttable ? `<span class="cut" data-t="${p.track}" data-f0="${p.strip[i - 1]}" data-f="${f}" ${zoomed ? 'data-direct="1"' : ""}
+       title="${zoomed ? "cut here" : "cut piece here (zooms in first if the pictures are far apart)"}">✂</span>` : '<span class="gap"></span>') : "") +
+    `<img src="strip/${p.track}/${f}.jpg?v=${S.version}${zoomed ? "&wide=1" : ""}" style="height:${h}px">`).join("")}</div>`;
 }
+// ✂ between two pictures: if they're more than a couple of frames apart, the bird changed somewhere
+// in between, so zoom into that gap first (and again) until the cut lands on the right frame.
+let cutting = false;
 function bindCuts(root = document) {
-  root.querySelectorAll(".cut").forEach(c => c.onclick = async () => {
-    const t = +c.dataset.t, f = +c.dataset.f;
-    if (!confirm(`Cut piece #${t} at ${clockOf(f / S.fps)}?\n\nEverything from this frame on becomes a new piece, ` +
-                 `so you can label the two halves separately.`)) return;
-    toast("Cutting… (extracting new pictures)");
-    sel = null;
-    await api("api/split", { track: t, frame: f });
-    toast("Cut ✂ — label each half");
-  });
+  root.querySelectorAll(".cut").forEach(c => c.onclick = () => cutAt(+c.dataset.t, +c.dataset.f0, +c.dataset.f, !!c.dataset.direct));
 }
-function toast(m) { const t = $("#toast"); t.textContent = m; t.style.opacity = 1; clearTimeout(t._t);
-                    t._t = setTimeout(() => t.style.opacity = 0, 1400); }
+async function cutAt(t, f0, f, direct) {  // zoom once (from the main filmstrip), never again inside the zoom
+  if (cutting) return toast("Still cutting — one moment…");
+  if (!direct) {
+    const g = await (await fetch(`api/gap/${t}/${f0}/${f}`)).json();
+    if (g.frames && g.frames.length > 3) return showGap(t, g.frames);
+  }
+  closeGap();
+  if (!confirm(`Cut piece #${t} at ${clockOf(f / S.fps)}?\n\nEverything from this frame on becomes a new piece, ` +
+               `so you can label the two halves separately.`)) return;
+  cutting = true; toast("Cutting… (extracting new pictures)", 60000); sel = null;
+  try { if (await api("api/split", { track: t, frame: f })) toast("Cut ✂ — label each half"); }
+  finally { cutting = false; }
+}
+function showGap(t, frames) {
+  let z = $("#zoom");
+  if (!z) { z = document.createElement("div"); z.id = "zoom"; document.body.appendChild(z); }
+  const secs = ((frames[frames.length - 1] - frames[0]) / S.fps).toFixed(1);
+  z.innerHTML = `<div class="zbox"><h3>Where does it change? <span class="meta">piece #${t}, ${clockOf(frames[0] / S.fps)}–${clockOf(frames[frames.length - 1] / S.fps)}
+      (${secs}s between the two pictures you picked) · click ✂ where the bird changes — if you can't see it, a
+      cut anywhere in the middle is fine, or close and answer "can't tell which hen"</span>
+      <button class="act" id="zclose" style="margin-left:auto">close</button></h3>
+    ${film({ track: t, strip: frames }, 200, true, true)}</div>`;
+  z.style.display = "flex";
+  z.querySelector("#zclose").onclick = closeGap;
+  z.onclick = e => { if (e.target === z) closeGap(); };
+  bindCuts(z);
+}
+function closeGap() { const z = $("#zoom"); if (z) z.style.display = "none"; }
+function toast(m, ms = 1400) { const t = $("#toast"); t.textContent = m; t.style.opacity = 1; clearTimeout(t._t);
+                    t._t = setTimeout(() => t.style.opacity = 0, ms); }
 
 function render() {
   $("#qcount").textContent = `(${S.questions})`;
@@ -133,7 +170,8 @@ function renderName() {
        class="${f.sure ? "sure" : ""} ${f.flag || ""} ${sel && sel.track === f.track ? "sel" : ""}"
        title="piece #${f.track}${f.flag === "partial" ? " (only part of the bird)" : f.flag === "loose" ? " (box a bit too big)" : ""}">`).join("")}</div>
     </div>`).join("") + [["multiple", "Set aside: several chickens in one box"],
-                           ["not_chicken", "Set aside: not a chicken"]].map(([k, title]) => `
+                           ["not_chicken", "Set aside: not a chicken"],
+                           ["unsure", "Set aside: a hen, can't tell which"]].map(([k, title]) => `
     <div class="card" style="opacity:.85"><h3><span>${title}</span>
       <span class="meta">${S.aside[k].length} pieces · not counted for any chicken · click to put one back</span></h3>
     <div class="strip">${S.aside[k].map(f => `<img src="${img(f.crop)}" data-t="${f.track}" data-aside="${k}"
@@ -163,7 +201,7 @@ function renderName() {
 
 function showPanel() {
   const p = $("#panel"), cur = S.chickens.find(c => c.id === sel.chicken);
-  const where = cur ? esc(label(cur)) : sel.aside === "multiple" ? "several chickens" : "not a chicken";
+  const where = cur ? esc(label(cur)) : sel.aside === "multiple" ? "several chickens" : sel.aside === "unsure" ? "can't tell which hen" : "not a chicken";
   p.style.display = "block";
   p.innerHTML = `<img src="${sel.crop}"><div class="meta">piece #${sel.track}, now in <b>${where}</b></div>
     <div class="opts">
@@ -175,6 +213,7 @@ function showPanel() {
       <button class="act" data-v="new">+ new chicken</button>
       ${sel.aside !== "multiple" ? '<button class="act no" data-v="multiple">several chickens</button>' : ""}
       ${sel.aside !== "not_chicken" ? '<button class="act no" data-v="not_chicken">not a chicken</button>' : ""}
+      ${sel.aside !== "unsure" ? '<button class="act" data-v="unsure">can\'t tell which hen</button>' : ""}
       <button class="act" data-v="close">close</button></div>
     <div id="pfilm"><div class="meta">loading filmstrip…</div></div>`;
   fetch(`api/piece/${sel.track}`).then(r => r.json()).then(pc => {
@@ -186,6 +225,51 @@ function showPanel() {
     const t = sel.track; sel = null;
     await api("api/answer", { track: t, chicken: b.dataset.c ? +b.dataset.c : null, verdict: b.dataset.v });
   }));
+}
+
+// ---- marking: brush = an answer; paint filmstrip pictures; accept = cut where marks change + answer each part
+const MARK_COLOURS = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#9085e9", "#e66767", "#008300"];
+function markColour(k) {
+  if (k.startsWith("c")) { const i = S.chickens.findIndex(c => `c${c.id}` === k); return MARK_COLOURS[i % MARK_COLOURS.length]; }
+  return { unsure: "#9a9a95", not_chicken: "#555", multiple: "#6a5acd" }[k] || "#888";
+}
+const markName = k => k.startsWith("c") ? label(S.chickens.find(c => `c${c.id}` === k) || { id: +k.slice(1), name: "" })
+                                        : { unsure: "can't tell", not_chicken: "not a chicken", multiple: "several" }[k];
+function bindMarking(q) {
+  let brush = null, painting = false, marks = {};
+  const base = `c${q.chicken}`, pics = [...document.querySelectorAll(".paint .pic")];
+  const show = () => {
+    pics.forEach(p => { const k = marks[p.dataset.f]; p.classList.toggle("marked", !!k);
+      p.style.setProperty("--mc", k ? markColour(k) : "transparent"); p.querySelector(".tag").textContent = k ? markName(k) : ""; });
+    const seq = pics.map(p => marks[p.dataset.f] || base), parts = seq.filter((k, i) => !i || k !== seq[i - 1]);
+    const any = Object.keys(marks).length > 0;
+    $("#markbar").style.display = any ? "flex" : "none";
+    $("#mplan").textContent = parts.length > 1 ? `→ cut into ${parts.length} parts: ${parts.map(markName).join("  |  ")}`
+                                               : `→ whole piece: ${markName(parts[0])}`;
+    window._keys && (window._keys.enter = any ? accept : undefined);
+  };
+  const paint = p => { if (!brush) return toast("First pick what to mark with (the buttons above the pictures)");
+    marks[p.dataset.f] = brush; show(); };
+  document.querySelectorAll(".brush").forEach(b => b.onclick = () => {
+    brush = brush === b.dataset.b ? null : b.dataset.b;
+    document.querySelectorAll(".brush").forEach(x => x.classList.toggle("on", x.dataset.b === brush)); });
+  pics.forEach(p => {
+    p.onpointerdown = e => { e.preventDefault();
+      if (brush && marks[p.dataset.f] === brush) { delete marks[p.dataset.f]; show(); return; }  // click again: unmark
+      painting = true; paint(p); };
+    p.onpointerenter = () => { if (painting) paint(p); };
+  });
+  window.onpointerup = () => { painting = false; };
+  async function accept() {
+    if (cutting) return toast("Still working — one moment…");
+    cutting = true; toast("Cutting and answering…", 60000);
+    try { if (await api("api/mark", { track: q.track, marks: pics.map(p => ({ frame: +p.dataset.f, label: marks[p.dataset.f] || base })) }))
+            toast("Done ✓"); }
+    finally { cutting = false; }
+  }
+  $("#maccept").onclick = accept;
+  $("#mreset").onclick = () => { marks = {}; show(); };
+  setTimeout(show);
 }
 
 function renderAsk() {
@@ -207,12 +291,21 @@ function renderAsk() {
           <button class="act no" id="n">No <kbd>N</kbd></button>
           <button class="act no" id="m">Several chickens <kbd>M</kbd></button>
           <button class="act no" id="x">Not a chicken <kbd>X</kbd></button>
+          <button class="act" id="u" title="A hen, but too little of her is visible to tell which">Can't tell which hen <kbd>U</kbd></button>
           <button class="act" id="c">New chicken <kbd>C</kbd></button>
         </div>
         <div class="meta" style="margin-bottom:6px">…or it's actually:</div>
         <div class="answers" style="margin-top:0">${others.map((c, i) =>
           `<button class="act" data-c="${c.id}">${i < 9 ? `<kbd>${i + 1}</kbd> ` : ""}${esc(label(c))}</button>`).join("")}</div>
-        <div class="meta">The whole piece, start → end (✂ to cut if it changes bird):</div>${film(q, 100)}</div>
+        <div class="meta" style="margin-top:14px">Changes bird part-way? Pick what to mark with, click or drag across the
+          pictures it applies to, then <b>Accept</b> — the piece is cut where your marks change. Unmarked pictures stay ${esc(q.name)}.</div>
+        <div class="brushes">${[...S.chickens.map(c => [`c${c.id}`, label(c)]), ["unsure", "can't tell"], ["not_chicken", "not a chicken"],
+          ["multiple", "several"]].map(([k, n]) => `<button class="act brush" data-b="${k}" style="--bc:${markColour(k)}">${esc(n)}</button>`).join("")}</div>
+        <div class="film paint">${q.strip.map(f => `<div class="pic" data-f="${f}"><img src="strip/${q.track}/${f}.jpg?v=${S.version}"
+          draggable="false" style="height:100px"><span class="tag"></span></div>`).join("")}</div>
+        <div class="answers" id="markbar" style="display:none;margin-top:8px">
+          <button class="act yes" id="maccept">✓ Accept marking <kbd>Enter</kbd></button>
+          <span class="meta" id="mplan"></span><button class="act" id="mreset">clear marks</button></div></div>
       <div><h2 style="color:#aaa">${esc(q.name)} looks like:</h2><div class="meta">&nbsp;</div>
         <div class="grid" style="margin-top:62px">${q.ref_crops.map(c => `<img src="${img(c)}">`).join("")}</div></div>
     </div>`;
@@ -223,11 +316,13 @@ function renderAsk() {
   $("#n").onclick = () => ans("no", q.chicken);
   $("#m").onclick = () => ans("multiple", null);
   $("#x").onclick = () => ans("not_chicken", null);
+  $("#u").onclick = () => ans("unsure", null);
   $("#c").onclick = () => ans("new", null);
   document.querySelectorAll("button[data-c]").forEach(b => b.onclick = () => ans("moved", +b.dataset.c));
+  bindMarking(q);
   window._keys = { y: () => ans("yes", q.chicken), n: () => ans("no", q.chicken), x: () => ans("not_chicken", null),
                    m: () => ans("multiple", null), p: () => ans("partial", q.chicken),
-                   l: () => ans("loose", q.chicken),
+                   l: () => ans("loose", q.chicken), u: () => ans("unsure", null),
                    c: () => ans("new", null) };
   others.slice(0, 9).forEach((c, i) => window._keys[String(i + 1)] = () => ans("moved", c.id));
   bindCuts();
@@ -267,6 +362,7 @@ function renderConflicts() {
           <button class="act" data-t="${p.track}" data-v="new">+ new chicken</button>
           <button class="act no" data-t="${p.track}" data-v="multiple">several chickens</button>
           <button class="act no" data-t="${p.track}" data-v="not_chicken">not a chicken</button>
+          <button class="act" data-t="${p.track}" data-v="unsure">can't tell which hen</button>
         </div></div>`).join("")}</div>`;
   document.querySelectorAll("#main button[data-t]").forEach(b => b.onclick = () =>
     api("api/answer", { track: +b.dataset.t, chicken: b.dataset.c ? +b.dataset.c : null, verdict: b.dataset.v }));
@@ -317,6 +413,8 @@ async function renderChecks() {
 }
 
 window.addEventListener("keydown", e => {
+  const z = $("#zoom");
+  if (z && z.style.display === "flex") { if (e.key === "Escape") closeGap(); return; }  // no answer keys while zoomed
   if (tab !== "ask" || e.target.tagName === "INPUT" || !window._keys) return;
   const f = window._keys[e.key.toLowerCase()]; if (f) { e.preventDefault(); window._keys = null; f(); }
 });

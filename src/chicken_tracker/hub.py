@@ -7,6 +7,7 @@ clips under one address, plus progress, frame review and skeleton labelling.
     /run/<run>/player/                 a clip's player        (<run> = folder under output/,
     /run/<run>/naming/                 a clip's naming page     e.g. 2026-11-02/143113-150338_ch04)
     /run/<run>/clips/                  short clips of set-aside pieces, if made
+    /metrics/                          per-hen charts for a day: distance, activity, runs
 
 The pages are the same ones the single-purpose servers show: each request is handed to that
 page's own handler with the prefix taken off, so they work identically here and on their own.
@@ -76,7 +77,7 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
 
     def find_run(rel: str) -> Path | None:
         p = (root / rel).resolve()
-        return p if root in p.parents and (p / "meta.json").exists() else None
+        return p if root in p.parents and ((p / "meta.json").exists() or (p / "progress.json").exists()) else None  # running: live picture
 
     def app_handler(key, make):
         with lock:
@@ -186,6 +187,20 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
                     extra = {"review_pending": sum(v.get("status") == "pending" for v in items.values()),
                              "pose_pending": sum(v.get("pose_status") == "pending" for v in items.values())}
                 return self._send(json.dumps({"runs": runs, "now": time.time(), **extra}).encode(), "application/json")
+            if path == "/metrics":
+                return self._redirect(f"/metrics/{q}")
+            if path == "/metrics/":
+                return self._send((resources.files("chicken_tracker") / "static" / "metrics.html").read_bytes(),
+                                  "text/html; charset=utf-8")
+            if path == "/metrics/api":
+                from urllib.parse import parse_qs
+                from . import metrics as Mx
+                all_runs = D.find_runs(root)
+                days = sorted({str(r.relative_to(root)).split("/")[0] for r in all_runs
+                               if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(r.relative_to(root)).split("/")[0])})
+                day = (parse_qs(query).get("day") or [days[-1] if days else ""])[0]
+                body = Mx.day_metrics(root, all_runs, day) if day else {}
+                return self._send(json.dumps({"days": days, **body}).encode(), "application/json")
             # shared pages: /progress/ /review/ /pose/
             for name in ("progress", "review", "pose"):
                 if path == f"/{name}":

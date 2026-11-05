@@ -33,8 +33,8 @@ def make_handler(run_dir: Path):
         return I.overlap_snapshot(store.data["video"], st["det"], a, b, k, fps=store.data["fps"])
 
     @functools.lru_cache(maxsize=2048)
-    def strip_img(track: int, frame: int, version: int) -> bytes | None:
-        return I.piece_frame(store.data["video"], st["det"], track, frame, store.data["fps"])
+    def strip_img(track: int, frame: int, version: int, wide: bool = False) -> bytes | None:
+        return I.piece_frame(store.data["video"], st["det"], track, frame, store.data["fps"], wide=wide)
 
     def current_checks() -> list[dict]:
         named_p = run_dir / "detections_named.csv"
@@ -99,7 +99,7 @@ def make_handler(run_dir: Path):
         c = next(c for c in store.data["chickens"] if c["id"] == q["chicken"])
         ref = sorted((t for t in c["tracks"] if t != q["track"]),
                      key=lambda t: -store.data["fragments"][str(t)]["n"])[:8]
-        return {**q, **piece(q["track"]), "ref_crops": [x for x in map(mid_crop, ref) if x],
+        return {**q, **piece(q["track"]), "strip": I.strip_frames(st["det"], q["track"], 20), "ref_crops": [x for x in map(mid_crop, ref) if x],
                 "name": c["name"] or f"Chicken {c['id'] + 1}"}
 
     def _conflict(cf: dict) -> dict:
@@ -129,6 +129,7 @@ def make_handler(run_dir: Path):
     VERDICT_LABEL = {"yes": "is {name}", "moved": "→ {name}", "partial": "only part of {name}",
                      "loose": "mostly {name}, box too big",
                      "multiple": "→ several chickens", "not_chicken": "→ not a chicken",
+                     "unsure": "→ a hen, can't tell which",
                      "new": "→ new chicken", "no": "is not {name}"}
 
     def mutate(fn, label: str):
@@ -189,8 +190,36 @@ def make_handler(run_dir: Path):
             I.export(run_dir)
             return state()
 
+    def do_mark(track: int, marks: list[dict]) -> dict:
+        """Marked filmstrip pictures -> cut the piece where the marks change, answer each part."""
+        with lock:
+            cuts, labels = I.mark_segments(st["det"], track, [(m["frame"], m["label"]) for m in marks])
+            names = {f"c{c['id']}": (c["name"] or f"Chicken {c['id'] + 1}") for c in store.data["chickens"]}
+            words = {"unsure": "can't tell", "not_chicken": "not a chicken", "multiple": "several", **names}
+            store.snapshot(f"marked piece #{track}: " + " | ".join(words.get(l, l) for l in labels),
+                           with_features=bool(cuts))
+            pieces = [track]
+            for f in reversed(cuts):  # last cut first: each new piece is the tail of `track`
+                st["det"] = I.split_piece(run_dir, store.data, st["det"], track, f)
+                pieces.insert(1, store.data["splits"][-1]["new"])
+            if cuts:
+                st["frags"] = _frags_from(st["det"])
+            owner = I.chicken_of(store.data)
+            for t, lab in zip(pieces, labels):
+                if lab.startswith("c"):
+                    c = int(lab[1:])
+                    I.apply_answer(store.data, t, c, "yes" if owner.get(t) == c else "moved")
+                else:
+                    I.apply_answer(store.data, t, None, lab)
+            I.refresh_confidence(store.data, st["frags"])
+            st["version"] += 1
+            store.save()
+            I.export(run_dir)
+            return state()
+
     def do_split(track: int, frame: int) -> dict:
         with lock:
+            I.check_cut(st["det"], track, frame, I.MIN_CUT_FRAMES)  # before the undo step, so a refused cut leaves none
             store.snapshot(f"cut piece #{track} at {clock(frame)}", with_features=True)
             st["det"] = I.split_piece(run_dir, store.data, st["det"], track, frame)
             st["frags"] = _frags_from(st["det"])  # identity.json isn't saved yet, so build from memory
@@ -230,6 +259,10 @@ def make_handler(run_dir: Path):
             if m:
                 c = next((c for c in current_checks() if c["key"] == unquote(m[1])), None)
                 return self._json(_check_view(c) if c else {"error": "gone"})
+            m = re.fullmatch(r"/api/gap/(\d+)/(\d+)/(\d+)", path)
+            if m:
+                return self._json({"track": int(m[1]),
+                                   "frames": I.gap_frames(st["det"], int(m[1]), int(m[2]), int(m[3]))})
             m = re.fullmatch(r"/api/piece/(\d+)", path)
             if m and m[1] in store.data["fragments"]:
                 return self._json(piece(int(m[1])))
@@ -238,7 +271,7 @@ def make_handler(run_dir: Path):
             if m and (jpg := snapshot(int(m[1]), int(m[2]), int(m[3]), v)):
                 return self._send(jpg, "image/jpeg")
             m = re.fullmatch(r"/strip/(\d+)/(\d+)\.jpg", path)
-            if m and (jpg := strip_img(int(m[1]), int(m[2]), v)):
+            if m and (jpg := strip_img(int(m[1]), int(m[2]), v, "wide=1" in self.path)):
                 return self._send(jpg, "image/jpeg")
             if path.startswith("/crop/"):
                 p = crops / Path(unquote(path[6:])).name  # strip any directories
@@ -276,6 +309,8 @@ def make_handler(run_dir: Path):
                                              "check dismissed (looks fine)"))
                 if self.path == "/api/undo":
                     return self._json(do_undo())
+                if self.path == "/api/mark":
+                    return self._json(do_mark(int(body["track"]), list(body["marks"])))
                 if self.path == "/api/split":
                     return self._json(do_split(int(body["track"]), int(body["frame"])))
             except (KeyError, ValueError, StopIteration) as e:
