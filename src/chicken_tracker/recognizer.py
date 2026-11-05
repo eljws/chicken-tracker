@@ -9,6 +9,7 @@ near-identical, so splitting by frame would make the test meaningless).
 from __future__ import annotations
 
 import json
+import time
 import random
 import shutil
 from collections import defaultdict
@@ -112,7 +113,15 @@ def train_recognizer(dataset: Path, model: str = "yolo11s-cls.pt", epochs: int =
                      device: str | None = None, batch: int = 64, lr0: float = 0.002) -> Path:
     from ultralytics import YOLO
 
+    from . import records
+
     dataset = Path(dataset).resolve()
+    rec = dataset.parent / "records"
+    try:
+        info = records.backup(dataset.parent, reason="before training recogniser")
+        print(f"Backup before training: {info['path']} ({info['copied']} files copied, {info['linked']} unchanged)")
+    except Exception as e:
+        print(f"WARNING: backup before training failed: {e}")
     runs = dataset.parent / "recognizer_runs"
     YOLO(model).train(data=str(dataset), epochs=epochs, imgsz=imgsz, batch=batch, device=device,
                       project=str(runs), name="hens", exist_ok=True, patience=15, plots=False,
@@ -120,7 +129,14 @@ def train_recognizer(dataset: Path, model: str = "yolo11s-cls.pt", epochs: int =
                       # swing 59-94% between epochs on ~3k crops
                       optimizer="SGD", lr0=lr0, cos_lr=True,
                       fliplr=0.5, flipud=0.0, hsv_h=0.0)  # no hue jitter: colour IS the identity
-    return runs / "hens" / "weights" / "best.pt"
+    best = runs / "hens" / "weights" / "best.pt"
+    if best.exists():
+        version = records.register("recognizer", best, version=f"hens-{time.strftime('%Y%m%d-%H%M')}",
+                                   parent=records.version_of("recognizer", model, root=rec),
+                                   trained_on={"dataset": str(dataset), "epochs": epochs, "imgsz": imgsz,
+                                               "start": str(model)}, root=rec)
+        print(f"Registered as recognizer {version}. Use it with: chicken-tracker models --use recognizer {version}")
+    return best
 
 
 def evaluate(dataset: Path, weights: Path, device: str | None = None) -> dict:

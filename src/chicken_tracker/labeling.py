@@ -26,6 +26,7 @@ import random
 import shutil
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import cv2
@@ -380,6 +381,43 @@ def split_train_val(items: dict[str, dict], val_frac: float = 0.2, block: int = 
     return splits
 
 
+def _splits(root: Path, done: dict) -> dict[str, str]:
+    """train/val that never changes for a frame once given (the frozen test set in records/)."""
+    from .records import frozen_splits
+
+    return frozen_splits(done, split_train_val, root=Path(root).resolve().parent / "records")
+
+
+def _after_training(kind: str, root: Path, best: Path, start_model: str, name: str, data: Path,
+                    epochs: int, imgsz: int) -> str | None:
+    """Register what was just trained (a copy that's never overwritten); returns its version."""
+    from . import records
+
+    if not Path(best).exists():
+        return None
+    rec = Path(root).resolve().parent / "records"
+    n_train = len(list((Path(data).parent / "images" / "train").glob("*")))
+    n_val = len(list((Path(data).parent / "images" / "val").glob("*")))
+    version = records.register(kind, best, version=f"{name}-{time.strftime('%Y%m%d-%H%M')}",
+                               parent=records.version_of(kind, start_model, root=rec),
+                               trained_on={"dataset": str(Path(root).resolve()), "train_frames": n_train,
+                                           "val_frames": n_val, "epochs": epochs, "imgsz": imgsz,
+                                           "start": str(start_model)}, root=rec)
+    print(f"Registered as {kind} {version} (records/models/{kind}/). "
+          f"Make it the one in use with: chicken-tracker models --use {kind} {version}")
+    return version
+
+
+def _backup_before(root: Path, what: str) -> None:
+    from .records import backup
+
+    try:
+        info = backup(Path(root).resolve().parent, reason=f"before {what}")
+        print(f"Backup before {what}: {info['path']} ({info['copied']} files copied, {info['linked']} unchanged)")
+    except Exception as e:  # never block training on a backup problem, but say so
+        print(f"WARNING: backup before {what} failed: {e}")
+
+
 def export_yolo(root: Path, class_name: str = "chicken", with_objects: bool = False) -> Path:
     """Write reviewed frames as a YOLO dataset; returns path to data.yaml."""
     store = LabelStore(root)
@@ -396,7 +434,7 @@ def export_yolo(root: Path, class_name: str = "chicken", with_objects: bool = Fa
         done = {k: v for k, v in done.items() if v.get("obj_status") == "done"}
     names = CLASSES if with_objects else {0: class_name}
 
-    splits = split_train_val(done)
+    splits = _splits(root, done)
 
     for split in ("train", "val"):
         (out / "images" / split).mkdir(parents=True)
@@ -434,6 +472,7 @@ def train(root: Path, model: str = "yolo11s.pt", epochs: int = 100, imgsz: int =
           name: str = "chicken") -> Path:
     from ultralytics import YOLO
 
+    _backup_before(root, f"training detector {name}")
     data = export_yolo(root, with_objects=with_objects)
     runs = (Path(root) / "runs").resolve()
     YOLO(model).train(data=str(data), epochs=epochs, imgsz=imgsz, batch=batch, device=device,
@@ -443,7 +482,8 @@ def train(root: Path, model: str = "yolo11s.pt", epochs: int = 100, imgsz: int =
                       optimizer="SGD", lr0=0.01,
                       fliplr=0.5, flipud=0.0, mosaic=1.0)
     best = runs / name / "weights" / "best.pt"
-    print(f"\nTrained model: {best}\nUse it with: chicken-tracker process VIDEO --model {best}")
+    print(f"\nTrained model: {best}")
+    _after_training("detector", root, best, model, name, data, epochs, imgsz)
     return best
 
 
@@ -523,7 +563,7 @@ def export_seg(root: Path, exclude_source: str | None = None) -> Path:
         done[k] = {**v, "polys": polys}
     if not done:
         raise SystemExit("No outlined frames yet - run `chicken-tracker outline` first.")
-    splits = split_train_val(done)
+    splits = _splits(root, done)
     for split in ("train", "val"):
         (out / "images" / split).mkdir(parents=True)
         (out / "labels" / split).mkdir(parents=True)
@@ -550,6 +590,7 @@ def train_seg(root: Path, model: str = "yolo11s-seg.pt", epochs: int = 100, imgs
               exclude_source: str | None = None) -> Path:
     from ultralytics import YOLO
 
+    _backup_before(root, f"training outline model {name}")
     data = export_seg(root, exclude_source=exclude_source)
     runs = (Path(root) / "runs").resolve()
     YOLO(model).train(data=str(data), epochs=epochs, imgsz=imgsz, batch=batch, device=device,
@@ -557,6 +598,7 @@ def train_seg(root: Path, model: str = "yolo11s-seg.pt", epochs: int = 100, imgs
                       optimizer="SGD", lr0=0.01, fliplr=0.5, flipud=0.0, mosaic=1.0)
     best = runs / name / "weights" / "best.pt"
     print(f"\nTrained outline model: {best}")
+    _after_training("seg", root, best, model, name, data, epochs, imgsz)
     return best
 
 
@@ -591,7 +633,7 @@ def export_pose(root: Path, use_auto: bool = True, min_auto_conf: int = 2) -> Pa
             done[k] = {**v, "poses": ps}
     if not done:
         raise SystemExit("No skeletons yet - run `chicken-tracker review --pose` first.")
-    splits = split_train_val(done)
+    splits = _splits(root, done)
     for split in ("train", "val"):
         (out / "images" / split).mkdir(parents=True)
         (out / "labels" / split).mkdir(parents=True)
@@ -627,6 +669,7 @@ def train_pose(root: Path, model: str = "yolo11s-pose.pt", epochs: int = 150, im
                batch: int = 8, device: str | None = None, use_auto: bool = True) -> Path:
     from ultralytics import YOLO
 
+    _backup_before(root, "training skeleton model")
     data = export_pose(root, use_auto=use_auto)
     runs = (Path(root) / "runs").resolve()
     YOLO(model).train(data=str(data), epochs=epochs, imgsz=imgsz, batch=batch, device=device,
@@ -634,4 +677,5 @@ def train_pose(root: Path, model: str = "yolo11s-pose.pt", epochs: int = 150, im
                       optimizer="SGD", lr0=0.01, fliplr=0.5, flipud=0.0, mosaic=1.0)
     best = runs / "pose" / "weights" / "best.pt"
     print(f"\nTrained skeleton model: {best}")
+    _after_training("pose", root, best, model, "pose", data, epochs, imgsz)
     return best

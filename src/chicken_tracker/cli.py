@@ -50,7 +50,9 @@ def _collect_videos(inputs: list[Path]) -> list[Path]:
 
 
 def cmd_process(a: argparse.Namespace) -> None:
-    cfg = TrackConfig(model=a.model, conf=a.conf, imgsz=a.imgsz, vid_stride=a.stride,
+    from .records import model_or
+
+    cfg = TrackConfig(model=model_or("detector", a.model, "yolo11s.pt"), conf=a.conf, imgsz=a.imgsz, vid_stride=a.stride,
                       device=a.device, classes=a.classes, skip_empty=a.skip_empty)
     if a.tracker:
         cfg.tracker = a.tracker
@@ -80,9 +82,10 @@ def cmd_mine(a: argparse.Namespace) -> None:
 
     if a.crowded:
         from .labeling import mine_crowded
+        from .records import model_or
 
         stats = mine_crowded(a.crowded, a.dataset, model=a.model if a.model != "yoloe-11l-seg.pt" else
-                             "dataset/runs/chicken/weights/best.pt", n=a.max_frames, device=a.device,
+                             model_or("detector", None, "dataset/runs/chicken/weights/best.pt"), n=a.max_frames, device=a.device,
                              video=str(a.video) if a.video else None)
         print(f"\n{stats}\nNext: chicken-tracker review {a.dataset}  (crowded frames come first)")
         return
@@ -141,7 +144,9 @@ def cmd_identify(a: argparse.Namespace) -> None:
         if a.auto_name:
             from .recognizer import auto_name
 
-            r = auto_name(a.run_dir, a.recognizer, device=a.device, video=str(a.video) if a.video else None)
+            from .records import model_or
+
+            r = auto_name(a.run_dir, model_or("recognizer", a.recognizer, "recognizer_runs/hens/weights/best.pt"), device=a.device, video=str(a.video) if a.video else None)
             print(f"Named by the recogniser: {r}")
     if not a.build_only:
         serve(a.run_dir, port=a.port, open_browser=not a.no_browser)
@@ -167,7 +172,9 @@ def cmd_recognizer(a: argparse.Namespace) -> None:
 def cmd_pose(a: argparse.Namespace) -> None:
     from .pose import run_pose
 
-    run_pose(a.run_dir, a.model, video=str(a.video) if a.video else None, device=a.device, conf=a.conf)
+    from .records import model_or
+
+    run_pose(a.run_dir, model_or("pose", a.model, "dataset/runs/pose/weights/best.pt"), video=str(a.video) if a.video else None, device=a.device, conf=a.conf)
     print("Switch on \"Skeletons\" in the player (chicken-tracker player RUN_DIR).")
 
 
@@ -181,6 +188,42 @@ def cmd_clean(a: argparse.Namespace) -> None:
     from .identity import clean_ghost_boxes
 
     print(clean_ghost_boxes(a.run_dir))
+
+
+def cmd_models(a: argparse.Namespace) -> None:
+    import datetime as dt
+
+    from . import records
+
+    if a.use:
+        records.use(a.use[0], a.use[1])
+        print(f"Now using {a.use[0]} {a.use[1]}")
+    if a.verify:
+        bad = records.verify()
+        print("\n".join(bad) if bad else "All registered models present and unchanged.")
+        return
+    if a.rounds:
+        for r in records.rounds(a.kind):
+            when = dt.datetime.fromtimestamp(r["at"]).strftime("%Y-%m-%d %H:%M")
+            print(f"#{r['id']} {when} {r['kind']}: {r['candidate']} vs {r['baseline']} "
+                  f"{'PROMOTED' if r['promoted'] else 'kept old'} {r['metrics']} {r['note'] or ''}")
+        return
+    rows = records.models(a.kind)
+    if not rows:
+        print("No models registered yet.")
+    for m in rows:
+        when = dt.datetime.fromtimestamp(m["created"]).strftime("%Y-%m-%d %H:%M")
+        mark = {"current": "● in use", "previous": "○ previous"}.get(m["status"], "  " + m["status"])
+        print(f"{m['kind']:<10} {m['version']:<32} {mark:<12} {when}  from {m['parent'] or '-'}"
+              + (f"  {m['note']}" if m["note"] else ""))
+
+
+def cmd_backup(a: argparse.Namespace) -> None:
+    from .records import BACKUP_ROOT, backup
+
+    info = backup(Path("."), Path(a.to) if a.to else BACKUP_ROOT, reason=a.reason or "by hand")
+    print(f"Backup: {info['path']}\n{info['files']} files: {info['copied']} copied "
+          f"({info['bytes_copied'] / 1e6:.1f} MB), {info['linked']} unchanged (linked to the previous backup)")
 
 
 def cmd_dashboard(a: argparse.Namespace) -> None:
@@ -249,8 +292,8 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("process", help="detect + track chickens in video file(s) and compute analytics")
     p.add_argument("inputs", nargs="+", type=Path, help="video files or directories")
     p.add_argument("-o", "--out", type=Path, default=Path("output"))
-    p.add_argument("--model", default="yolo11s.pt",
-                   help="YOLO weights; use your fine-tuned chicken model for best results")
+    p.add_argument("--model", default=None,
+                   help="YOLO weights (default: the current detector in `chicken-tracker models`)")
     p.add_argument("--classes", type=int, nargs="+",
                    help="class ids to track (default: auto-detect chicken/bird classes)")
     p.add_argument("--conf", type=float, default=0.25)
@@ -335,7 +378,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--rebuild", action="store_true", help="redo grouping (discards your answers)")
     p.add_argument("--auto-name", action="store_true",
                    help="name the hens with the recogniser (for a new day; needs a fresh build)")
-    p.add_argument("--recognizer", type=Path, default=Path("recognizer_runs/hens/weights/best.pt"))
+    p.add_argument("--recognizer", type=Path, default=None,
+                   help="default: the current recogniser in `chicken-tracker models`")
     p.add_argument("--build-only", action="store_true")
     p.add_argument("--port", type=int, default=8766)
     p.add_argument("--no-browser", action="store_true")
@@ -356,7 +400,8 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("pose", help="chicken skeletons over the whole video, for the player overlay")
     p.add_argument("run_dir", type=Path)
-    p.add_argument("--model", type=Path, default=Path("dataset/runs/pose/weights/best.pt"))
+    p.add_argument("--model", type=Path, default=None,
+                   help="default: the current skeleton model in `chicken-tracker models`")
     p.add_argument("--video", type=Path, help="source video, if it moved since `process`")
     p.add_argument("--conf", type=float, default=0.25)
     p.add_argument("--device", help="cpu, mps, 0, ...")
@@ -366,6 +411,18 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("run_dir", type=Path)
     p.add_argument("--video", type=Path, help="source video, if it moved since `process`")
     p.set_defaults(func=cmd_pecks)
+
+    p = sub.add_parser("models", help="list model versions; switch which one is in use; check the files")
+    p.add_argument("kind", nargs="?", help="detector, recognizer, pose or seg (default: all)")
+    p.add_argument("--use", nargs=2, metavar=("KIND", "VERSION"), help="make this version the one in use")
+    p.add_argument("--verify", action="store_true", help="check every stored model is present and unchanged")
+    p.add_argument("--rounds", action="store_true", help="list training rounds and whether they were promoted")
+    p.set_defaults(func=cmd_models)
+
+    p = sub.add_parser("backup", help="dated copy of your labels, frames, naming, records and models")
+    p.add_argument("--to", help="backup folder (default: ~/chicken-tracker-backups)")
+    p.add_argument("--reason")
+    p.set_defaults(func=cmd_backup)
 
     for name in ("home", "dashboard"):  # one server for everything: calendar, players, naming, labelling
         p = sub.add_parser(name, help="web page for everything: calendar of days, each clip's player and "
