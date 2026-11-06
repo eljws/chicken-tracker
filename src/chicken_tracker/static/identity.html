@@ -380,7 +380,7 @@ async function loadWhere(q) {
   bindWhereMode(q, w);  // videos are only made when one of the two buttons is clicked
 }
 
-let whereWide = false;
+let whereWide = false, whereBlob = null;
 const WHERE_MODES = `<div class="answers" style="margin:2px 0 4px">
       <button class="act wmode" data-wide="0">▶ Close-up: 3 s before → 3 s after, real speed</button>
       <button class="act wmode" data-wide="1">⏩ Wide: 1 min before → 1 min after, 4× fast, with trails</button></div>`;
@@ -404,7 +404,9 @@ async function loadWhereVideo(q, w) {
     if (!$("#wvidbox") || S.next?.track !== q.track || wide !== whereWide) return;
     const v = document.createElement("video");
     Object.assign(v, { id: "wvid", controls: true, loop: true, muted: true, autoplay: true, playsInline: true });
-    v.dataset.t = q.track; v.dataset.d = w.dots_made; v.dataset.wide = String(wide); v.src = URL.createObjectURL(blob);
+    v.dataset.t = q.track; v.dataset.d = w.dots_made; v.dataset.wide = String(wide);
+    if (whereBlob) URL.revokeObjectURL(whereBlob);  // only the newest is kept: the tab would otherwise hold every one
+    v.src = whereBlob = URL.createObjectURL(blob);
     v.style.cssText = "max-width:100%;max-height:340px;border-radius:6px;background:#000;display:block;margin:4px 0 6px";
     const legend = document.createElement("div");
     legend.className = "meta";
