@@ -537,6 +537,21 @@ def make_handler(run_dir: Path):
                     label = f"piece #{body['track']} " + VERDICT_LABEL.get(v, v).format(name=name_of(ch))
                     return self._json(mutate(lambda d: I.apply_answer(
                         d, int(body["track"]), int(ch) if ch is not None else None, v), label))
+                if self.path == "/api/answers":  # palette: many pictures painted at once, one undo step
+                    items = [(int(a["track"]), None if a.get("chicken") is None else int(a["chicken"]), str(a["verdict"]))
+                             for a in body["answers"]]
+                    if not items:
+                        raise ValueError("nothing painted")
+
+                    def paint_all(d):
+                        new_id = None  # every picture painted "+ new chicken" goes into the same new one
+                        for t, ch, v in items:
+                            if v == "new" and new_id is not None:
+                                ch, v = new_id, "moved"
+                            I.apply_answer(d, t, ch, v)
+                            if v == "new":
+                                new_id = d["answers"][-1]["chicken"]
+                    return self._json(mutate(paint_all, f"painted {len(items)} pictures"))
                 if self.path == "/api/resort":
                     return self._json(mutate(lambda d: I.resort(d, st["frags"]), "re-sort pieces"))
                 if self.path == "/api/isolate":
