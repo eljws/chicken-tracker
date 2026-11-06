@@ -79,6 +79,19 @@
   .paint .pic.bpartial { border-style: dashed; } .paint .pic.bloose { border-style: dotted; }
   .brushes .lbl { align-self: center; color: #aaa; font-size: 12px; min-width: 52px; }
   .brush.box { border-left-color: #888 !important; }
+  .npal { position: sticky; top: 51px; z-index: 4; background: #141414; padding: 6px 0 4px; border-bottom: 1px solid #333; margin-bottom: 10px; }
+  .npal .brushes { margin: 2px 0; }
+  .nb { border-left: 6px solid var(--bc) !important; }
+  .nb.on { background: #4a4a4a; outline: 2px solid var(--bc); color: #fff; font-weight: 600; }
+  .nb kbd { margin-left: 4px; }
+  #npend { display: none; gap: 8px; align-items: center; margin-top: 4px; }
+  .strip .np { position: relative; display: inline-block; line-height: 0; }
+  .strip .np .tag { position: absolute; left: 2px; right: 2px; bottom: 2px; font-size: 11px; line-height: 1.3; text-align: center; color: #fff;
+                    background: color-mix(in srgb, var(--mc) 85%, transparent); border-radius: 0 0 4px 4px; white-space: nowrap; overflow: hidden; pointer-events: none; }
+  .strip .np.painted img { outline: 3px solid var(--mc); outline-offset: -3px; }
+  .strip .np.painted.bpartial img { outline-style: dashed; } .strip .np.painted.bloose img { outline-style: dotted; }
+  body.painting .strip img { cursor: crosshair; }
+  .card h3 .rowact { font-size: 12px; padding: 3px 8px; }
   #zoom { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.75); z-index: 50; align-items: center; justify-content: center; }
   #zoom .zbox { background: #1d1d1d; border: 1px solid #444; border-radius: 8px; padding: 12px; max-width: 96vw; overflow-x: auto; }
   #zoom h3 { display: flex; gap: 10px; align-items: center; margin: 0 0 8px; }
@@ -176,7 +189,7 @@ function render() {
 
 function renderName() {
   const opts = S.chickens.map(c => `<option value="${c.id}">${esc(label(c))}</option>`).join("");
-  $("#main").innerHTML = `<div class="hint">Give each group its chicken's name. If two groups are the same bird,
+  $("#main").innerHTML = namePalette() + `<div class="hint">Give each group its chicken's name. If two groups are the same bird,
     merge them. Click a picture that's in the wrong group to move it. Green border = confirmed by you,
     dashed orange = only part of the bird, dotted blue = box a bit too big.</div>` +
     S.chickens.map(c => `
@@ -185,19 +198,23 @@ function renderName() {
       ${c.fragments.some(f => !f.sure) ? `<button class="act yes" data-all="${c.id}"
          title="Every picture in this row is ${esc(label(c))}: confirm the ones not yet confirmed">✓ all match</button>` : ""}
       <span class="meta">${c.fragments.length} pieces · ${c.fragments.filter(f => f.sure).length} confirmed · ${c.minutes} min seen</span>
+      ${NB.brush ? `<button class="act rowact" data-prow="${c.id}" title="Paint every picture in this row with the brush">🖌 paint whole row</button>` : ""}
+      ${NB.brush && NB.brush.startsWith("c") && NB.brush !== `c${c.id}` ? `<button class="act rowact" data-bmerge="${c.id}"
+         title="This whole group is the same bird as the brush: merge it (⌘Z undoes)">⇉ merge into ${esc(markName(NB.brush))}</button>` : ""}
       <span style="margin-left:auto" class="meta">same bird as</span>
       <select data-merge="${c.id}"><option value="">—</option>${opts.replace(`value="${c.id}"`, `value="${c.id}" disabled`)}</select>
     </h3>
-    <div class="strip">${c.fragments.map(f => `<img src="${img(f.crop)}" data-t="${f.track}" data-c="${c.id}"
+    <div class="strip" data-row="${c.id}">${c.fragments.map(f => `<span class="np" data-t="${f.track}"><img src="${img(f.crop)}" draggable="false" data-t="${f.track}" data-c="${c.id}"
        class="${f.sure ? "sure" : ""} ${f.flag || ""} ${sel && sel.track === f.track ? "sel" : ""}"
-       title="piece #${f.track}${f.flag === "partial" ? " (only part of the bird)" : f.flag === "loose" ? " (box a bit too big)" : ""}">`).join("")}</div>
+       title="piece #${f.track}${f.flag === "partial" ? " (only part of the bird)" : f.flag === "loose" ? " (box a bit too big)" : ""}"><span class="tag"></span></span>`).join("")}</div>
     </div>`).join("") + [["multiple", "Set aside: several chickens in one box"],
                            ["not_chicken", "Set aside: not a chicken"],
                            ["unsure", "Set aside: a hen, can't tell which"]].map(([k, title]) => `
     <div class="card" style="opacity:.85"><h3><span>${title}</span>
-      <span class="meta">${S.aside[k].length} pieces · not counted for any chicken · click to put one back</span></h3>
-    <div class="strip">${S.aside[k].map(f => `<img src="${img(f.crop)}" data-t="${f.track}" data-aside="${k}"
-       class="${sel && sel.track === f.track ? "sel" : ""}" title="piece #${f.track}">`).join("") ||
+      <span class="meta">${S.aside[k].length} pieces · not counted for any chicken · click to put one back</span>
+      ${NB.brush && S.aside[k].length ? `<button class="act rowact" data-prow="${k}" title="Paint every picture in this row with the brush">🖌 paint whole row</button>` : ""}</h3>
+    <div class="strip" data-row="${k}">${S.aside[k].map(f => `<span class="np" data-t="${f.track}"><img src="${img(f.crop)}" draggable="false" data-t="${f.track}" data-aside="${k}"
+       class="${sel && sel.track === f.track ? "sel" : ""}" title="piece #${f.track}"><span class="tag"></span></span>`).join("") ||
        '<span class="meta">none yet</span>'}</div></div>`).join("");
   document.querySelectorAll(".card input").forEach(i => {
     i.addEventListener("change", () => api("api/name", { chicken: +i.dataset.id, name: i.value }));
@@ -214,12 +231,90 @@ function renderName() {
     else s.value = "";
   }));
   document.querySelectorAll(".strip img").forEach(im => im.addEventListener("click", () => {
+    if (NB.brush) return;  // painting, not opening the panel
     sel = { track: +im.dataset.t, chicken: im.dataset.c !== undefined ? +im.dataset.c : null,
             aside: im.dataset.aside || null, crop: im.getAttribute("src") };
     render(); showPanel();
   }));
+  bindPalette();
   if (!sel) $("#panel").style.display = "none";
 }
+
+// ---- Name & merge palette: pick a brush, click or drag across pictures, Apply = one answer per picture, one undo step.
+// Two layers like Questions: which bird (hen / new / set aside) and how good the box is (✓ fine / ◐ part / ◑ too big).
+// A box mark alone keeps the picture in its row; ✓ alone confirms it there.
+const NB = { brush: null, bird: {}, box: {} };
+const BOXB = [["box:yes", "✓ right as is", "Confirm the picture in the row it's in"], ["box:partial", "◐ only part of her", "Only part of the hen is in the picture"],
+              ["box:loose", "◑ box too big", "Mostly her, but the box catches a bit of a neighbour"]];
+const ASIDEB = [["new", "+ new chicken"], ["multiple", "several"], ["not_chicken", "not a chicken"], ["unsure", "can't tell"]];
+function namePalette() {
+  const b = (k, n, key, t = "") => `<button class="act nb${NB.brush === k ? " on" : ""}" data-nb="${k}" style="--bc:${k.startsWith("box:") ? "#bbb" : markColour(k)}"
+      ${t ? `title="${esc(t)}"` : ""}>${esc(n)}${key ? `<kbd>${key}</kbd>` : ""}</button>`;
+  return `<div class="npal">
+    <div class="brushes"><span class="lbl">Bird</span>${S.chickens.map((c, i) => b(`c${c.id}`, label(c), i < 9 ? i + 1 : "")).join("")}
+      ${ASIDEB.map(([k, n]) => b(k, n)).join("")}</div>
+    <div class="brushes"><span class="lbl">Box</span>${BOXB.map(([k, n, t]) => b(k, n, "", t)).join("")}
+      <span class="meta" style="align-self:center;margin-left:8px">${NB.brush ? "click or drag across pictures · click a painted one again to unpaint · <kbd>Esc</kbd> stop painting"
+        : "pick a brush, then click or drag across pictures (no brush: click a picture for the menu)"}</span></div>
+    <div id="npend"><b id="ncount"></b><span class="meta" id="nplan"></span>
+      <button class="act yes" id="napply">Apply <kbd>Enter</kbd></button><button class="act" id="nclear">clear</button></div></div>`;
+}
+function npAnswer(t) {  // what Apply will record for picture t, or null
+  const im = document.querySelector(`.strip img[data-t="${t}"]`); if (!im) return null;
+  const cur = im.dataset.c !== undefined ? +im.dataset.c : null, bird = NB.bird[t], box = NB.box[t];
+  if (bird && !bird.startsWith("c")) return { track: t, chicken: null, verdict: bird };  // new / set aside
+  const ch = bird ? +bird.slice(1) : cur;
+  if (ch === null) return null;  // a box mark on a set-aside picture: nothing to do
+  return { track: t, chicken: ch, verdict: box === "partial" || box === "loose" ? box : ch === cur ? "yes" : "moved" };
+}
+function npShow() {
+  document.querySelectorAll(".strip .np").forEach(p => { const t = p.dataset.t, bird = NB.bird[t], box = NB.box[t], on = !!(bird || box);
+    const a = on ? npAnswer(t) : null, im = p.querySelector("img");
+    p.classList.toggle("painted", on); p.classList.toggle("bpartial", box === "partial"); p.classList.toggle("bloose", box === "loose");
+    p.style.setProperty("--mc", markColour(bird || (im.dataset.c !== undefined ? `c${im.dataset.c}` : "x")));
+    p.querySelector(".tag").textContent = !a ? (on ? "—" : "") : a.verdict === "new" ? "+ new" :
+      a.chicken === null ? markName(a.verdict) : (a.verdict === "yes" ? "✓ " : "") + markName(`c${a.chicken}${BOX_SIGN[a.verdict] ? ":" + a.verdict : ""}`); });
+  const todo = [...new Set([...Object.keys(NB.bird), ...Object.keys(NB.box)])].map(Number).map(npAnswer).filter(Boolean);
+  const pend = $("#npend"); if (!pend) return todo;
+  pend.style.display = todo.length ? "flex" : "none";
+  $("#ncount").textContent = `${todo.length} picture${todo.length === 1 ? "" : "s"} painted`;
+  const n = {}; todo.forEach(a => { const k = a.verdict === "new" ? "+ new chicken" : a.chicken === null ? markName(a.verdict)
+    : a.verdict === "yes" ? `✓ ${markName("c" + a.chicken)}` : markName(`c${a.chicken}${BOX_SIGN[a.verdict] ? ":" + a.verdict : ""}`); n[k] = (n[k] || 0) + 1; });
+  $("#nplan").textContent = "→ " + Object.entries(n).map(([k, c]) => `${c}× ${k}`).join(" · ");
+  return todo;
+}
+function npSet(t, toggle) {  // paint picture t with the brush (toggle: unpaint if it already has it)
+  const box = NB.brush.startsWith("box:"), layer = box ? NB.box : NB.bird, v = NB.brush.replace("box:", "");
+  if (toggle && layer[t] === v) delete layer[t]; else layer[t] = v;
+}
+function pickBrush(k) { NB.brush = NB.brush === k ? null : k; document.body.classList.toggle("painting", !!NB.brush); sel = null; render(); }
+let npDrag = false;
+function bindPalette() {
+  document.querySelectorAll(".nb").forEach(b => b.onclick = () => pickBrush(b.dataset.nb));
+  document.querySelectorAll(".strip .np").forEach(p => {
+    p.onpointerdown = e => { if (!NB.brush) return; e.preventDefault(); npDrag = true; npSet(p.dataset.t, true); npShow(); };
+    p.onpointerenter = () => { if (npDrag && NB.brush) { npSet(p.dataset.t, false); npShow(); } };
+  });
+  document.querySelectorAll("[data-prow]").forEach(b => b.onclick = () => {
+    document.querySelectorAll(`.strip[data-row="${b.dataset.prow}"] .np`).forEach(p => npSet(p.dataset.t, false)); npShow(); });
+  document.querySelectorAll("[data-bmerge]").forEach(b => b.onclick = async () => {
+    const src = S.chickens.find(c => c.id === +b.dataset.bmerge), dst = +NB.brush.slice(1);
+    if (await api("api/merge", { src: src.id, dst })) toast(`Merged ${label(src)} into ${markName(NB.brush)} — ⌘Z undoes`, 2500); });
+  const ap = $("#napply"); if (ap) ap.onclick = npApply;
+  const cl = $("#nclear"); if (cl) cl.onclick = () => { NB.bird = {}; NB.box = {}; npShow(); };
+  npShow();
+}
+window.addEventListener("pointerup", () => { npDrag = false; });
+async function npApply() {
+  const todo = npShow(); if (!todo.length) return;
+  if (await api("api/answers", { answers: todo })) { NB.bird = {}; NB.box = {}; npShow(); toast(`${todo.length} pictures done ✓ — ⌘Z undoes all of them`, 2500); }
+}
+window.addEventListener("keydown", e => {
+  if (tab !== "name" || e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.metaKey || e.ctrlKey) return;
+  if (e.key === "Escape") { if (NB.brush) pickBrush(NB.brush); return; }
+  if (e.key === "Enter") { e.preventDefault(); return npApply(); }
+  const i = "123456789".indexOf(e.key); if (i >= 0 && S.chickens[i]) pickBrush(`c${S.chickens[i].id}`);
+});
 
 function showPanel() {
   const p = $("#panel"), cur = S.chickens.find(c => c.id === sel.chicken);
@@ -253,7 +348,7 @@ function showPanel() {
 const MARK_COLOURS = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#9085e9", "#e66767", "#008300"];
 function markColour(k) {
   if (k.startsWith("c")) { const i = S.chickens.findIndex(c => `c${c.id}` === k); return MARK_COLOURS[i % MARK_COLOURS.length]; }
-  return { unsure: "#9a9a95", not_chicken: "#555", multiple: "#6a5acd" }[k] || "#888";
+  return { unsure: "#9a9a95", not_chicken: "#555", multiple: "#6a5acd", new: "#e0e0e0" }[k] || "#888";
 }
 const BOX_SIGN = { partial: " ◐ part", loose: " ◑ too big" };
 const markName = k => { const [h, f] = k.split(":");
