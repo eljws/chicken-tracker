@@ -767,6 +767,9 @@ def piece_clip(video: str, det: pd.DataFrame, track: int, fps: float, pad_s: flo
         proc = subprocess.Popen([ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo",
                                  "-pix_fmt", "bgr24", "-s", f"{ow}x{oh}", "-r", f"{fps:.3f}", "-i", "-",
                                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+                                 # a key picture every 8 frames, no B-frames: the picture follows while you
+                                 # drag the slider (default ~250 apart: it only updated after letting go)
+                                 "-g", "8", "-bf", "0",
                                  "-movflags", "+faststart", str(out)], stdin=subprocess.PIPE)
         cap.set(cv2.CAP_PROP_POS_FRAMES, f0)
         for f in range(f0, f1 + 1):
