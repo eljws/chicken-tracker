@@ -438,3 +438,89 @@ def test_mark_segments_cut_where_marks_change():
     assert I.mark_segments(det, 3, [(f, "c0") for f in strip]) == ([], ["c0"])  # all the same: no cut
     with pytest.raises(ValueError, match="few frames"):
         I.mark_segments(det, 3, [(f, "c0") for f in range(100, 299)] + [(299, "c2")])  # last part: 1 frame
+
+
+def test_mark_segments_box_flag_is_its_own_part():
+    import pandas as pd
+    det = pd.DataFrame({"track_id": [3] * 200, "frame": range(100, 300)})
+    strip = I.strip_frames(det, 3, 20)
+    marks = [(f, "c0") for f in strip[:10]] + [(f, "c0:partial") for f in strip[10:]]
+    cuts, labels = I.mark_segments(det, 3, marks)
+    assert labels == ["c0", "c0:partial"] and len(cuts) == 1
+
+
+def test_trace_follows_nearby_pieces_and_stops_at_anchor():
+    import pandas as pd
+    rows = []
+    def piece(tid, f0, f1, x):
+        rows.extend({"track_id": tid, "frame": f, "x1": x, "y1": 100, "x2": x + 50, "y2": 150} for f in range(f0, f1))
+    piece(1, 0, 50, 100)      # anchor, far back
+    piece(2, 60, 100, 110)    # starts 10 frames after 1 ended, same spot
+    piece(3, 105, 150, 115)   # the piece in question
+    piece(9, 95, 140, 900)    # another bird, far away: never a link
+    det = pd.DataFrame(rows)
+    hops = I.trace(det, 3, -1, fps=10, is_anchor=lambda t: t == 1)
+    assert [h["track"] for h in hops] == [2, 1] and hops[-1].get("anchor") and not hops[0]["ambiguous"]
+    assert hops[0]["gap_s"] == 0.6
+    assert I.trace(det, 3, 1, fps=10) == []          # nothing after it
+    fwd = I.trace(det, 1, 1, fps=10)
+    assert [h["track"] for h in fwd] == [2, 3]
+
+
+def test_trace_links_sitting_hen_across_long_gap():
+    import pandas as pd
+    rows = []
+    def piece(tid, f0, f1, x):
+        rows.extend({"track_id": tid, "frame": f, "x1": x, "y1": 100, "x2": x + 50, "y2": 150} for f in range(f0, f1))
+    piece(1, 0, 50, 100)
+    piece(2, 200, 300, 102)   # 15 s later, same spot: she sat there unseen
+    piece(3, 450, 500, 300)   # 15 s later but 4 bodies away: not linked
+    det = pd.DataFrame(rows)
+    assert [h["track"] for h in I.trace(det, 2, -1, fps=10)] == [1]
+    assert I.trace(det, 2, 1, fps=10) == []
+
+
+def test_dots_merge_flips_into_one_event():
+    from chicken_tracker.dots import _merge_flips
+    ev = [{"kind": "teleport", "hen": "Pepper", "from_frame": f, "to_frame": f + 1, "tracks": [148, 157], "detail": ""}
+          for f in (100, 102, 106)] + [{"kind": "teleport", "hen": "Pepper", "from_frame": 400, "to_frame": 401,
+                                        "tracks": [1, 2], "detail": "x"}]
+    out = _merge_flips(ev, fps=15)
+    assert len(out) == 2 and out[0]["to_frame"] == 107 and "3 times" in out[0]["detail"]
+
+
+def test_whereabouts_rules_out_hen_seen_elsewhere_and_finds_dot():
+    import pandas as pd
+    from chicken_tracker.dots import whereabouts
+    rows = []
+    def piece(tid, f0, f1, x):
+        rows.extend({"track_id": tid, "frame": f, "x1": x, "y1": 100, "x2": x + 50, "y2": 150} for f in range(f0, f1))
+    piece(5, 100, 200, 100)   # the piece in question
+    piece(6, 90, 210, 800)    # Salt, far away the whole time
+    det = pd.DataFrame(rows)
+    n = 300
+    rocky = {"x": [125] * n, "y": [150] * n, "src": "F" * n}          # her followed dot is right where #5 starts
+    dots = {"dots": {"Rocky": rocky, "Salt": {"x": [825] * n, "y": [150] * n, "src": "S" * n}}, "illegal": []}
+    w = whereabouts(det, {5: 0, 6: 1}, {0: "Rocky", 1: "Salt"}, 5, dots, fps=10, asked=0)
+    assert w["ruled_out"] == ["Salt"] and w["fits"] == ["Rocky"]
+
+
+def test_box_left_bird_flags_box_that_moves_away_from_pixels():
+    import pandas as pd
+    from chicken_tracker import dots as D
+    rows = [{"track_id": 7, "frame": f, "x1": 100 if f < 20 else 400, "y1": 100, "x2": 150 if f < 20 else 450, "y2": 150}
+            for f in range(0, 40)]
+    det = pd.DataFrame(rows)
+    flow = {"window": {}}
+    for f in (0, 10, 20):  # pixels stay where the bird was (x ~125) the whole time
+        r = det[det.frame == f].iloc[0]
+        flow["window"][D._box_key(f, r)] = [f + 10, 125 if f < 20 else 425, 150]
+    ev, checked = D.box_left_bird(det, 7, flow, fps=10)
+    assert checked == 3 and len(ev) == 1 and ev[0]["from_frame"] == 10 and 10 <= ev[0]["cut_frame"] <= 20
+
+
+def test_resize_handles_cutout_that_crashed_opencv():
+    import numpy as np
+    img = np.random.randint(0, 255, (1536, 1920, 3), np.uint8)
+    out = I.resize(img[1269:1536, 556:1101], (544, 266))  # this exact cut-out segfaulted cv2.resize
+    assert out.shape == (266, 544, 3)

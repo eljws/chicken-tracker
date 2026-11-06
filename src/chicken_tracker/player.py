@@ -247,6 +247,10 @@ def make_handler(run_dir: Path, video_path: Path, source_video: str | None):
                 return self._send(overlay_bytes(), "application/json")
             if path == "/poses.json":  # skeleton layer: fetched only when switched on
                 return self._send(poses_bytes(), "application/json")
+            if path == "/dots.json":  # one dot per hen + illegal moves, from `chicken-tracker dots`
+                p = run_dir / "dots.json"
+                if p.exists():
+                    return self._send(p.read_bytes(), "application/json")
             if path == "/video.mp4":
                 return self._video()
             self._send(b'{"error":"not found"}', "application/json", 404)

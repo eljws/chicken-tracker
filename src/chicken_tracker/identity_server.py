@@ -36,6 +36,224 @@ def make_handler(run_dir: Path):
     def strip_img(track: int, frame: int, version: int, wide: bool = False) -> bytes | None:
         return I.piece_frame(store.data["video"], st["det"], track, frame, store.data["fps"], wide=wide)
 
+    @functools.lru_cache(maxsize=16)
+    def clip_mp4(track: int, version: int, direction: int = 0) -> bytes | None:
+        if not direction:
+            return I.piece_clip(store.data["video"], st["det"], track, store.data["fps"])
+        tr = trace_view(track, version)["back" if direction < 0 else "forward"]
+        if not tr:
+            return None
+        fps = store.data["fps"]
+        mine = st["det"].loc[st["det"].track_id == track, "frame"]
+        far = tr[-1]
+        span = ((far["last"] if far.get("anchor") else far["first"]) - 3 * fps, mine.min() + 3 * fps) if direction < 0 \
+            else (mine.max() - 3 * fps, (far["first"] if far.get("anchor") else far["last"]) + 3 * fps)
+        chain = {h["track"]: f"#{h['track']} {h['name']}{' (sure)' if h['sure'] else ''}" for h in tr}
+        return I.piece_clip(store.data["video"], st["det"], track, fps, chain=chain, span=span)
+
+    dots_state = {"key": None, "data": None, "computing": False, "error": None}
+
+    def dots_data():
+        p = run_dir / "dots.json"
+        if not p.exists():
+            return None
+        key = p.stat().st_mtime
+        if dots_state["key"] != key:
+            dots_state["key"], dots_state["data"] = key, json.loads(p.read_text())
+        return dots_state["data"]
+
+    def compute_dots():
+        from . import dots as DOTS
+        try:
+            while True:
+                dots_state["again"] = False
+                try:
+                    DOTS.compute(run_dir, video=store.data["video"])
+                except (ValueError, KeyError, OSError):  # caught a file mid-write: try again shortly
+                    dots_state["again"] = True
+                if not dots_state["again"]:
+                    break
+                threading.Event().wait(1.0)
+        except Exception as e:  # shown on the page
+            dots_state["error"] = str(e)
+        finally:
+            dots_state["computing"] = False
+
+    def schedule_dots(delay: float = 1.5):
+        """Debounced: rebuild the dots 1.5 s after the last change (answer, cut, mark...). Uses the saved
+        pixel-following, so it's a few seconds; only for clips whose dots were worked out once."""
+        if not (run_dir / "dots.json").exists():
+            return
+        if dots_state["computing"]:
+            dots_state["again"] = True
+            return
+        if dots_state.get("timer"):
+            dots_state["timer"].cancel()
+
+        def fire():
+            dots_state.update(timer=None, computing=True, error=None)
+            compute_dots()
+        dots_state["timer"] = threading.Timer(delay, fire)
+        dots_state["timer"].daemon = True
+        dots_state["timer"].start()
+
+    flow_state = {"key": None, "data": None}
+
+    def flow_data():
+        p = store.root / "flow.json"
+        if not p.exists():
+            return None
+        if flow_state["key"] != p.stat().st_mtime:
+            flow_state["key"], flow_state["data"] = p.stat().st_mtime, json.loads(p.read_text())
+        return flow_state["data"]
+
+    def where_view(t: int) -> dict:
+        from . import dots as DOTS
+        import datetime as dt
+        names = {c["id"]: name_of(c["id"]) for c in store.data["chickens"]}
+        dd = dots_data()
+        out = DOTS.whereabouts(st["det"], I.chicken_of(store.data), names, t, dd, store.data["fps"],
+                               asked=I.chicken_of(store.data).get(t), sure=I.confirmed(store.data))
+        out["computing"], out["dots_error"] = dots_state["computing"], dots_state["error"]
+        out["updating"] = bool(dots_state.get("timer")) or (dots_state["computing"] and dd is not None)
+        if dd:
+            out["dots_made"] = dt.datetime.fromtimestamp(dots_state["key"]).strftime("%d %b %H:%M:%S")
+        fl = flow_data()
+        if fl:  # does the box stay on the bird its pixels show? one check per second of the piece
+            splits, checked = DOTS.box_left_bird(st["det"], t, fl, store.data["fps"])
+            out["pixels"] = {"checked": checked, "splits": [{**e, "clock": clock(e["cut_frame"]),
+                                                              "at_s": round(e["cut_frame"] / store.data["fps"], 1)}
+                                                             for e in splits]}
+        return out
+
+    MARK_BGR = [(229, 135, 57), (38, 89, 217), (112, 158, 25), (0, 133, 201), (129, 81, 213),
+                (233, 133, 144), (103, 103, 230), (0, 131, 0)]  # same colours as the page's hen brushes
+
+    @functools.lru_cache(maxsize=16)
+    def where_mp4(track: int, version: int, dots_key, wide: bool = False) -> bytes | None:
+        """The piece from 3 s before to 3 s after, with every hen's dot in her colour.
+        wide: 60 s before to 60 s after at 4x speed, each dot pulling a 6 s trail, timeline bar."""
+        import cv2
+        dd = dots_data()
+        if not dd:
+            return None
+        fps = store.data["fps"]
+        w = where_view(track)
+        fr = st["det"].loc[st["det"].track_id == track, "frame"]
+        pad = (60 if wide else 3) * fps
+        f0, f1 = int(max(0, fr.min() - pad)), int(fr.max() + pad)
+        if wide and f1 - f0 > 240 * fps:  # very long piece: keep it under 4 min of video time
+            f1 = f0 + int(240 * fps)
+        p0, p1 = int(fr.min()), int(fr.max())
+        col = {name_of(c["id"]): MARK_BGR[i % len(MARK_BGR)] for i, c in enumerate(store.data["chickens"])}
+        pd_ = st["det"][st["det"].track_id == track]
+        cxy = (float(((pd_.x1 + pd_.x2) / 2).median()), float(pd_.y2.median()))
+        body = float(I.np.hypot(pd_.x2 - pd_.x1, pd_.y2 - pd_.y1).median())
+        show = [h["name"] for h in w["hens"] if h["fits"] in (("yes", "near") if wide else ("yes",)) or h["asked"]]
+        pts = []
+        for n in show:
+            dn = dd["dots"].get(n)
+            if dn:  # only where she was seen or moving near the piece, so the view isn't stretched to the whole yard
+                pts += [(dn["x"][g], dn["y"][g]) for g in range(f0, min(f1 + 1, len(dn["src"])), 4)
+                        if dn["src"][g] in ("SF" if wide else "SFWL")
+                        and I.np.hypot(dn["x"][g] - cxy[0], dn["y"][g] - cxy[1]) < 8 * body]
+        trail = int(6 * fps)
+
+        mine = st["det"][st["det"].track_id == track].groupby("frame").first()
+        asked = next((h["name"] for h in w["hens"] if h["asked"]), None)
+        F = cv2.FONT_HERSHEY_SIMPLEX
+
+        def text(out, s, xy, c, size=0.55):
+            cv2.putText(out, s, xy, F, size, (0, 0, 0), 4, cv2.LINE_AA)
+            cv2.putText(out, s, xy, F, size, c, 1 if size < 0.6 else 2, cv2.LINE_AA)
+
+        def draw(out, f, to):  # drawn on the final picture: same size whatever the zoom
+            H, W = out.shape[:2]
+            for k, (n, dn) in enumerate(sorted(dd["dots"].items())):
+                c = col.get(n, (200, 200, 200))
+                if wide:  # her last 6 s as a line that fades out behind her: where she came from
+                    prev = None
+                    for g in range(max(0, f - trail), min(f + 1, len(dn["src"])), 2):
+                        if dn["src"][g] in "SF":
+                            p = to(dn["x"][g], dn["y"][g])
+                            if prev is not None and abs(p[0] - prev[0]) + abs(p[1] - prev[1]) < W // 4:
+                                a = 0.25 + 0.75 * (g - f + trail) / trail
+                                cv2.line(out, prev, p, tuple(int(v * a) for v in c), 3, cv2.LINE_AA)
+                            prev = p
+                        else:
+                            prev = None
+                if f >= len(dn["src"]) or dn["src"][f] == "-":
+                    continue
+                src = dn["src"][f]
+                x, y = to(dn["x"][f], dn["y"][f])
+                if not (0 <= x < W and 0 <= y < H):
+                    continue
+                if n == asked and src == "S" and f in mine.index:  # that's this piece itself, already boxed
+                    r = mine.loc[f]
+                    if abs((r.x1 + r.x2) / 2 - dn["x"][f]) < 3 and abs(r.y2 - dn["y"][f]) < 3:
+                        continue
+                if src == "S":
+                    cv2.circle(out, (x, y), 8, (0, 0, 0), -1)
+                    cv2.circle(out, (x, y), 6, c, -1)
+                    lab = n
+                elif src == "F":
+                    cv2.circle(out, (x, y), 9, (0, 0, 0), 4)
+                    cv2.circle(out, (x, y), 9, c, 2)
+                    lab = n + " (moving)"
+                else:  # not seen, waiting where last seen: faint, no label (they pile up where hens hide)
+                    cv2.circle(out, (x, y), 7, tuple(int(v * 0.6) for v in c), 1)
+                    continue
+                text(out, lab, (x + 12, y + 5 + (k % 3 - 1) * 16), c, 0.6)
+            if wide:  # timeline: whole span grey, the piece yellow, white playhead
+                y, X = H - 6, lambda g: int((g - f0) / max(1, f1 - f0) * (W - 1))
+                cv2.rectangle(out, (0, y - 3), (W - 1, H - 1), (70, 70, 70), -1)
+                cv2.rectangle(out, (X(p0), y - 3), (X(p1), H - 1), (0, 215, 255), -1)
+                cv2.rectangle(out, (X(f) - 2, y - 9), (X(f) + 2, H - 1), (255, 255, 255), -1)
+                inside = p0 <= f <= p1
+                text(out, "4x  " + ("THIS PIECE" if inside else "before" if f < p0 else "after"), (W - 200, 28),
+                     (0, 215, 255) if inside else (255, 255, 255), 0.7)
+
+        return I.piece_clip(store.data["video"], st["det"], track, fps, span=(f0, f1), extra_pts=pts,
+                            max_s=250.0 if wide else 90.0, step=4 if wide else 1, draw_after=draw)
+
+    def belief(t: int) -> dict:
+        """Who a piece is and how sure: confirmed by you, recogniser >= 0.9 over >= 5 crops, or a guess."""
+        owner, name = I.chicken_of(store.data), name_of
+        c = owner.get(t)
+        out = {"name": name(c) if c is not None else "—", "chicken": c, "sure": False, "by": "guess", "p": None}
+        for key, why in ((k, w) for w, k in I.EXCLUDED_KEYS.items()):
+            if t in store.data.get(key, []):
+                return {**out, "name": why, "by": "you", "sure": False}
+        if t in I.confirmed(store.data):
+            return {**out, "sure": True, "by": "you"}
+        rec = recog()
+        if rec:
+            pred, classes = rec
+            rows = pred[pred.track_id == t]
+            if len(rows) >= 5:
+                cols = [f"p_{k}" for k in classes]
+                mean = rows[cols].mean()
+                top = mean.idxmax()[2:]
+                out.update(p=round(float(mean.max()), 2), rec=top)
+                if mean.max() >= 0.9:
+                    agree = c is not None and out["name"] == top
+                    out.update(by="recogniser" if agree else "guess", sure=agree)
+        return out
+
+    @functools.lru_cache(maxsize=64)
+    def trace_view(track: int, version: int) -> dict:
+        fps = store.data["fps"]
+        res = {}
+        for key, d in (("back", -1), ("forward", 1)):
+            hops = I.trace(st["det"], track, d, fps, is_anchor=lambda t: belief(t)["sure"])
+            for h in hops:
+                h.update(belief(h["track"]))
+                h["clock"] = clock(h["join_frame"])
+                if h["alt"] is not None:
+                    h["alt_name"] = belief(h["alt"])["name"]
+            res[key] = hops
+        return res
+
     def current_checks() -> list[dict]:
         named_p = run_dir / "detections_named.csv"
         if not named_p.exists():
@@ -196,7 +414,9 @@ def make_handler(run_dir: Path):
             cuts, labels = I.mark_segments(st["det"], track, [(m["frame"], m["label"]) for m in marks])
             names = {f"c{c['id']}": (c["name"] or f"Chicken {c['id'] + 1}") for c in store.data["chickens"]}
             words = {"unsure": "can't tell", "not_chicken": "not a chicken", "multiple": "several", **names}
-            store.snapshot(f"marked piece #{track}: " + " | ".join(words.get(l, l) for l in labels),
+            box = {"partial": " (only part)", "loose": " (box too big)"}
+            word = lambda l: words.get(l.split(":")[0], l) + box.get(l.partition(":")[2], "")
+            store.snapshot(f"marked piece #{track}: " + " | ".join(word(l) for l in labels),
                            with_features=bool(cuts))
             pieces = [track]
             for f in reversed(cuts):  # last cut first: each new piece is the tail of `track`
@@ -206,9 +426,11 @@ def make_handler(run_dir: Path):
                 st["frags"] = _frags_from(st["det"])
             owner = I.chicken_of(store.data)
             for t, lab in zip(pieces, labels):
+                lab, _, flag = lab.partition(":")  # "c3:partial" = hen 3, only part of her / box too big
                 if lab.startswith("c"):
                     c = int(lab[1:])
-                    I.apply_answer(store.data, t, c, "yes" if owner.get(t) == c else "moved")
+                    verdict = flag if flag in I.BOX_FLAGS else "yes" if owner.get(t) == c else "moved"
+                    I.apply_answer(store.data, t, c, verdict)
                 else:
                     I.apply_answer(store.data, t, None, lab)
             I.refresh_confidence(store.data, st["frags"])
@@ -273,6 +495,19 @@ def make_handler(run_dir: Path):
             m = re.fullmatch(r"/strip/(\d+)/(\d+)\.jpg", path)
             if m and (jpg := strip_img(int(m[1]), int(m[2]), v, "wide=1" in self.path)):
                 return self._send(jpg, "image/jpeg")
+            m = re.fullmatch(r"/api/where/(\d+)", path)
+            if m:
+                return self._json(where_view(int(m[1])))
+            m = re.fullmatch(r"/api/trace/(\d+)", path)
+            if m:
+                return self._json(trace_view(int(m[1]), st["version"]))
+            m = re.fullmatch(r"/where/(\d+)\.mp4", path)
+            if m and (mp4 := where_mp4(int(m[1]), v, dots_state["key"] if dots_data() else None, "wide=1" in self.path)):
+                return self._send(mp4, "video/mp4")
+            m = re.fullmatch(r"/clip/(\d+)\.mp4", path)
+            direction = -1 if "dir=back" in self.path else 1 if "dir=forward" in self.path else 0
+            if m and (mp4 := clip_mp4(int(m[1]), v, direction)):
+                return self._send(mp4, "video/mp4")
             if path.startswith("/crop/"):
                 p = crops / Path(unquote(path[6:])).name  # strip any directories
                 if p.is_file():
@@ -291,6 +526,11 @@ def make_handler(run_dir: Path):
                 if self.path == "/api/confirm_all":
                     label = f"all remaining pieces of {name_of(body['chicken'])} confirmed"
                     return self._json(mutate(lambda d: I.confirm_all(d, int(body["chicken"])), label))
+                if self.path == "/api/dots":  # (re)compute dots.json in the background, ~1-2 min
+                    if not dots_state["computing"]:
+                        dots_state.update(computing=True, error=None)
+                        threading.Thread(target=compute_dots, daemon=True).start()
+                    return self._json({"computing": True})
                 if self.path == "/api/answer":
                     ch = body.get("chicken")
                     v = str(body["verdict"])
@@ -315,6 +555,9 @@ def make_handler(run_dir: Path):
                     return self._json(do_split(int(body["track"]), int(body["frame"])))
             except (KeyError, ValueError, StopIteration) as e:
                 return self._json({"error": f"{e}"}, 400)
+            finally:
+                if self.path != "/api/dots":
+                    schedule_dots()  # any change: refresh every hen's dot 1.5 s after the last one
             self._json({"error": "not found"}, 404)
 
     return Handler

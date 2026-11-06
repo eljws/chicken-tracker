@@ -51,6 +51,24 @@
   .gap { width: 4px; }
   .brushes { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
   .brush { border-left: 6px solid var(--bc) !important; }
+  .spd.on { outline: 2px solid #ffc107; }
+  .trow { display: flex; align-items: center; gap: 4px; overflow-x: auto; padding-bottom: 4px; }
+  .tcard { background: #262626; border: 2px solid #3a3a3a; border-radius: 6px; padding: 4px; font-size: 12px; min-width: 120px; max-width: 170px; }
+  .tcard.sure { border-color: #4caf50; } .tcard.amb { border-color: #ffb74d; } .tcard.me { border-color: #ffd54f; }
+  .tcard img { max-width: 100%; border-radius: 4px; } .tcard .warn { color: #ffb74d; }
+  .tarrow { color: #888; font-size: 18px; }
+  .where { background: #202020; border: 1px solid #333; border-radius: 8px; padding: 8px 10px; margin: 8px 0 12px; }
+  .whead { font-weight: 600; margin-bottom: 6px; } .wverdict { font-weight: 400; color: #ddd; margin-left: 6px; }
+  .wrows { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px; }
+  .wrow { background: #262626; border-radius: 6px; padding: 5px 8px; font-size: 13px; } .wrow.no { opacity: .55; }
+  .wrow .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; }
+  .wwhy { font-size: 12px; margin-top: 2px; line-height: 1.4; } .wwhy .hit { color: #8bd48b; }
+  .wtag { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #333; color: #bbb; }
+  .wmode.on { outline: 2px solid #ffc107; color: #fff; }
+  .wtag.yes { background: #1f4d2a; color: #9be39b; } .wtag.near { background: #3d3a1f; color: #e0d68a; }
+  .wwhy .weak { color: #d8cf8a; } .wtag.no { background: #4d1f1f; color: #f0a0a0; }
+  .where a { color: #8ab4f8; }
+  .where .warn { color: #ffb74d; font-size: 13px; margin-bottom: 4px; }
   .brush.on { background: #4a4a4a; outline: 2px solid var(--bc); color: #fff; font-weight: 600; }
   .paint { gap: 4px; user-select: none; }
   .paint .pic { position: relative; cursor: crosshair; border: 3px solid var(--mc, transparent); border-radius: 6px; }
@@ -58,6 +76,9 @@
   .paint .pic .tag { position: absolute; left: 0; right: 0; bottom: 0; font-size: 11px; text-align: center; color: #fff;
                      background: color-mix(in srgb, var(--mc) 85%, transparent); white-space: nowrap; overflow: hidden; }
   .paint .pic:not(.marked) .tag { display: none; }
+  .paint .pic.bpartial { border-style: dashed; } .paint .pic.bloose { border-style: dotted; }
+  .brushes .lbl { align-self: center; color: #aaa; font-size: 12px; min-width: 52px; }
+  .brush.box { border-left-color: #888 !important; }
   #zoom { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.75); z-index: 50; align-items: center; justify-content: center; }
   #zoom .zbox { background: #1d1d1d; border: 1px solid #444; border-radius: 8px; padding: 12px; max-width: 96vw; overflow-x: auto; }
   #zoom h3 { display: flex; gap: 10px; align-items: center; margin: 0 0 8px; }
@@ -79,7 +100,8 @@
 <div id="panel"></div>
 <div id="toast"></div>
 <script>
-let S = null, tab = "name", sel = null;
+const TABS = ["name", "ask", "conflicts", "checks"];
+let S = null, tab = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "name", sel = null;  // #ask opens Questions
 const $ = s => document.querySelector(s);
 const label = c => c.name || `Chicken ${c.id + 1}`;
 const img = n => `crop/${encodeURIComponent(n)}`;
@@ -233,29 +255,38 @@ function markColour(k) {
   if (k.startsWith("c")) { const i = S.chickens.findIndex(c => `c${c.id}` === k); return MARK_COLOURS[i % MARK_COLOURS.length]; }
   return { unsure: "#9a9a95", not_chicken: "#555", multiple: "#6a5acd" }[k] || "#888";
 }
-const markName = k => k.startsWith("c") ? label(S.chickens.find(c => `c${c.id}` === k) || { id: +k.slice(1), name: "" })
-                                        : { unsure: "can't tell", not_chicken: "not a chicken", multiple: "several" }[k];
+const BOX_SIGN = { partial: " ◐ part", loose: " ◑ too big" };
+const markName = k => { const [h, f] = k.split(":");
+  return (h.startsWith("c") ? label(S.chickens.find(c => `c${c.id}` === h) || { id: +h.slice(1), name: "" })
+                            : { unsure: "can't tell", not_chicken: "not a chicken", multiple: "several" }[h]) + (BOX_SIGN[f] || ""); };
 function bindMarking(q) {
-  let brush = null, painting = false, marks = {};
+  // two layers: which bird (marks) and, on top, how good the box is (boxm: partial / loose)
+  let brush = null, painting = false, marks = {}, boxm = {};
   const base = `c${q.chicken}`, pics = [...document.querySelectorAll(".paint .pic")];
+  const final = f => { const h = marks[f] || base;  // box quality only means something for a hen
+    return h.startsWith("c") && boxm[f] ? `${h}:${boxm[f]}` : h; };
   const show = () => {
-    pics.forEach(p => { const k = marks[p.dataset.f]; p.classList.toggle("marked", !!k);
-      p.style.setProperty("--mc", k ? markColour(k) : "transparent"); p.querySelector(".tag").textContent = k ? markName(k) : ""; });
-    const seq = pics.map(p => marks[p.dataset.f] || base), parts = seq.filter((k, i) => !i || k !== seq[i - 1]);
-    const any = Object.keys(marks).length > 0;
+    pics.forEach(p => { const f = p.dataset.f, on = !!(marks[f] || boxm[f]);
+      p.classList.toggle("marked", on);
+      p.classList.toggle("bpartial", boxm[f] === "partial"); p.classList.toggle("bloose", boxm[f] === "loose");
+      p.style.setProperty("--mc", on ? markColour(marks[f] || base) : "transparent");
+      p.querySelector(".tag").textContent = on ? markName(final(f)) : ""; });
+    const seq = pics.map(p => final(p.dataset.f)), parts = seq.filter((k, i) => !i || k !== seq[i - 1]);
+    const any = Object.keys(marks).length + Object.keys(boxm).length > 0;
     $("#markbar").style.display = any ? "flex" : "none";
     $("#mplan").textContent = parts.length > 1 ? `→ cut into ${parts.length} parts: ${parts.map(markName).join("  |  ")}`
                                                : `→ whole piece: ${markName(parts[0])}`;
     window._keys && (window._keys.enter = any ? accept : undefined);
   };
+  const layer = () => brush.startsWith("box:") ? boxm : marks, val = () => brush.replace("box:", "");
   const paint = p => { if (!brush) return toast("First pick what to mark with (the buttons above the pictures)");
-    marks[p.dataset.f] = brush; show(); };
+    layer()[p.dataset.f] = val(); show(); };
   document.querySelectorAll(".brush").forEach(b => b.onclick = () => {
     brush = brush === b.dataset.b ? null : b.dataset.b;
     document.querySelectorAll(".brush").forEach(x => x.classList.toggle("on", x.dataset.b === brush)); });
   pics.forEach(p => {
     p.onpointerdown = e => { e.preventDefault();
-      if (brush && marks[p.dataset.f] === brush) { delete marks[p.dataset.f]; show(); return; }  // click again: unmark
+      if (brush && layer()[p.dataset.f] === val()) { delete layer()[p.dataset.f]; show(); return; }  // click again: unmark
       painting = true; paint(p); };
     p.onpointerenter = () => { if (painting) paint(p); };
   });
@@ -263,13 +294,186 @@ function bindMarking(q) {
   async function accept() {
     if (cutting) return toast("Still working — one moment…");
     cutting = true; toast("Cutting and answering…", 60000);
-    try { if (await api("api/mark", { track: q.track, marks: pics.map(p => ({ frame: +p.dataset.f, label: marks[p.dataset.f] || base })) }))
+    try { if (await api("api/mark", { track: q.track, marks: pics.map(p => ({ frame: +p.dataset.f, label: final(p.dataset.f) })) }))
             toast("Done ✓"); }
     finally { cutting = false; }
   }
   $("#maccept").onclick = accept;
-  $("#mreset").onclick = () => { marks = {}; show(); };
+  $("#mreset").onclick = () => { marks = {}; boxm = {}; show(); };
   setTimeout(show);
+}
+
+// where were the hens while this piece was seen? rules hens out (seen elsewhere) and in (her dot was right here)
+async function loadWhere(q) {
+  const box = $("#where");
+  let w;
+  try { w = await (await fetch(`api/where/${q.track}?v=${S.version}`)).json(); } catch { box.innerHTML = ""; return; }
+  if (!box.isConnected || S.next?.track !== q.track) return;  // moved on meanwhile
+  const at = (x, before) => {
+    if (!x) return `<span class="meta">${before ? "before" : "after"}: no trace</span>`;
+    const where = before ? "where it starts" : "where it ends", b = x.bodies <= 0.5 ? "right at" : `${x.bodies} body lengths from`;
+    const ago = x.age_s >= 60 ? "over a minute" : `${x.age_s}s`;
+    const who = x.track == null ? "" : x.confirmed ? ` (#${x.track}, you confirmed)` : ` (#${x.track}, only the recogniser's guess)`;
+    const txt = x.src === "S" ? `seen ${b} ${where}${x.later ? ` ${x.age_s}s later` : ""}${who}`
+              : x.src === "F" ? `her moving pixels led ${b} ${where} (${ago} after last seen)`
+              : `not seen for ${ago}; last seen ${b} ${where}`;
+    const cls = x.bodies > 1.5 ? "meta" : x.strength === "strong" ? "hit" : x.strength === "weak" ? "weak" : "meta";
+    return `<span class="${cls}">${before ? "before" : "after"}: ${txt}</span>`;
+  };
+  const rows = w.hens.map(h => {
+    const tag = h.fits === "no" ? `<span class="wtag no">✗ ruled out</span>` : h.fits === "yes" ? `<span class="wtag yes">✓ fits</span>`
+              : h.fits === "near" ? `<span class="wtag near">≈ was near earlier</span>` : `<span class="wtag">? no sign</span>`;
+    const why = h.fits === "no" ? `<span class="meta">seen elsewhere for ${h.elsewhere_s}s of this piece (${h.elsewhere_tracks.map(t => "#" + t).join(", ")})</span>`
+              : w.has_dots ? `${at(h.before, true)}<br>${at(h.after, false)}` : `<span class="meta">—</span>`;
+    return `<div class="wrow ${h.fits}"><span class="dot" style="background:${markColour("c" + h.chicken)}"></span>
+      <b>${esc(h.name)}</b>${h.asked ? ` <span class="meta">(asked)</span>` : ""} ${tag}<div class="wwhy">${why}</div></div>`;
+  }).join("");
+  const fits = w.hens.filter(h => h.fits === "yes"), out = w.hens.filter(h => h.fits === "no"), near = w.hens.filter(h => h.fits === "near");
+  const age = h => Math.min(...[h.before, h.after].filter(x => x && x.bodies <= 1.5).map(x => x.age_s));
+  let verdict;
+  if (!w.has_dots) verdict = out.length ? `Ruled out: <b>${out.map(h => esc(h.name)).join(", ")}</b> (seen elsewhere at the same time).` : "No hen is seen elsewhere at the same time.";
+  else if (fits.length === 1) {
+    const guess = [fits[0].before, fits[0].after].some(x => x && x.src === "S" && x.confirmed === false)
+                  && ![fits[0].before, fits[0].after].some(x => x && x.confirmed);
+    verdict = `Only <b>${esc(fits[0].name)}</b> fits${fits[0].asked ? " — the one asked" : ""}` +
+              (guess ? ` — but that's from a piece only the recogniser named, not you; check it` : "") + ".";
+  }
+  else if (fits.length > 1) verdict = `${fits.map(h => `<b>${esc(h.name)}</b>`).join(" and ")} were both right here — positions can't tell them apart; go by the look or play it.`;
+  else if (near.length) verdict = `No hen was clearly here. Last seen near this spot: ${near.map(h => `<b>${esc(h.name)}</b> (${age(h) >= 60 ? "over a minute" : age(h) + "s"} before)`).join(", ")}${near.length > 1 ? " — a spot hens go in and out of, so positions can't decide; go by the look" : " — weak evidence (a while ago)"}.`;
+  else verdict = `No hen's dot was near this piece${out.length ? ` and ${out.map(h => esc(h.name)).join(", ")} ${out.length > 1 ? "were" : "was"} elsewhere` : ""} — a hen coming into view here, or maybe not a chicken.`;
+  const ill = (w.illegal || []).map(e => `<div class="warn">⚠ ${esc(e.detail)}</div>`).join("");
+  const px = w.pixels, pxLine = !px ? "" : px.splits.length
+    ? px.splits.map((e, k) => `<div class="warn">🔬 At ${e.clock} the box left the bird it was on — in 1 s it moved ${e.bodies} body lengths
+        away from where her pixels went (switched to another bird?) <button class="act pxcut" data-k="${k}">✂ Cut here</button>
+        <button class="act pxsee" data-k="${k}">▶ see it</button></div>`).join("")
+    : px.checked ? `<div class="meta">🔬 Pixels: the box stays on the same bird in all ${px.checked} one-second checks ✓</div>` : "";
+  const dotsLine = w.updating ? `<span class="meta">⟳ updating positions after your last change…</span>`
+    : w.computing ? `<span class="meta">⏳ following every hen's pixels through the video (3–6 min, once per clip)…</span>`
+    : w.dots_error ? `<span class="warn">dots failed: ${esc(w.dots_error)}</span>`
+    : w.has_dots ? `<span class="meta">positions as of ${w.dots_made} — they update by themselves after each answer</span>`
+    : `<span class="meta">Positions before/after need every hen's dot — </span><button class="act" id="wcomp">follow every hen's pixels (3–6 min, once)</button>`;
+  const old = box.querySelector("#wvid"), oldKids = [...(box.querySelector("#wvidbox")?.children || [])];  // keep a loaded video
+  box.innerHTML = `<div class="whead">📍 Where were the hens? <span class="wverdict">${verdict}</span></div>${ill}${pxLine}
+    ${w.has_dots ? `<div id="wvidbox">${WHERE_MODES}</div>` : ""}
+    <div class="wrows">${rows}</div>
+    <div class="answers" style="margin-top:4px">${fits.map(h => `<button class="act yes wuse" data-c="${h.chicken}">It's ${esc(h.name)}</button>`).join("")}
+      ${dotsLine}</div>`;
+  box.querySelectorAll(".wuse").forEach(b => b.onclick = () => api("api/answer", { track: q.track, chicken: +b.dataset.c,
+                                                                                  verdict: +b.dataset.c === q.chicken ? "yes" : "moved" }));
+  const start = async e => { e && e.preventDefault(); await fetch("api/dots", { method: "POST", body: "{}" }); loadWhere(q); };
+  $("#wcomp") && ($("#wcomp").onclick = start);
+  box.querySelectorAll(".pxcut").forEach(b => b.onclick = async () => {
+    if (cutting) return; cutting = true; toast("Cutting…", 20000);
+    try { if (await api("api/split", { track: q.track, frame: px.splits[+b.dataset.k].cut_frame })) toast("Cut ✓ — both parts get asked again if unsure"); }
+    finally { cutting = false; } });
+  box.querySelectorAll(".pxsee").forEach(b => b.onclick = async () => {
+    if (!$("#wvid")) { whereWide = false; await loadWhereVideo(q, w); }  // make the close-up first
+    const v = $("#wvid"); if (!v) return;
+    // close-up starts 3 s before the piece at real speed; wide starts 60 s before at 4x: jump to just before the switch
+    const wide = v.dataset.wide === "true", pad = wide ? 60 : 3, k = wide ? 4 : 1;
+    v.currentTime = Math.max(0, (px.splits[+b.dataset.k].at_s - Math.max(0, q.start - pad) - k) / k);
+    v.playbackRate = wide ? 0.25 : 0.5; v.play(); });
+  if (w.computing || w.updating) setTimeout(() => loadWhere(q), w.updating ? 2000 : 5000);
+  if (!w.has_dots) return;
+  if (old && old.dataset.t == q.track && old.dataset.d === w.dots_made && old.dataset.wide === String(whereWide)) {
+    $("#wvidbox").replaceChildren(...oldKids); bindWhereMode(q, w); return; }
+  bindWhereMode(q, w);  // videos are only made when one of the two buttons is clicked
+}
+
+let whereWide = false;
+const WHERE_MODES = `<div class="answers" style="margin:2px 0 4px">
+      <button class="act wmode" data-wide="0">▶ Close-up: 3 s before → 3 s after, real speed</button>
+      <button class="act wmode" data-wide="1">⏩ Wide: 1 min before → 1 min after, 4× fast, with trails</button></div>`;
+function bindWhereMode(q, w) {
+  const v = $("#wvid");
+  document.querySelectorAll(".wmode").forEach(b => {
+    b.classList.toggle("on", !!v && (b.dataset.wide === "1") === whereWide);
+    b.onclick = () => { whereWide = b.dataset.wide === "1"; loadWhereVideo(q, w); };
+  });
+}
+async function loadWhereVideo(q, w) {
+  const box = $("#wvidbox"); if (!box) return;
+  const modes = WHERE_MODES;
+  box.innerHTML = modes + `<div class="meta" id="wvidmsg">⏳ making the ${whereWide ? "wide 4× video (takes ~10–30 s)" : "video"}…</div>`;
+  bindWhereMode(q, w);
+  const wide = whereWide;
+  try {
+    const r = await fetch(`where/${q.track}.mp4?v=${S.version}&d=${encodeURIComponent(w.dots_made)}${wide ? "&wide=1" : ""}`);
+    if (!r.ok) throw new Error();
+    const blob = await r.blob();
+    if (!$("#wvidbox") || S.next?.track !== q.track || wide !== whereWide) return;
+    const v = document.createElement("video");
+    Object.assign(v, { id: "wvid", controls: true, loop: true, muted: true, autoplay: true, playsInline: true });
+    v.dataset.t = q.track; v.dataset.d = w.dots_made; v.dataset.wide = String(wide); v.src = URL.createObjectURL(blob);
+    v.style.cssText = "max-width:100%;max-height:340px;border-radius:6px;background:#000;display:block;margin:4px 0 6px";
+    const legend = document.createElement("div");
+    legend.className = "meta";
+    legend.innerHTML = (wide ? `yellow box = this piece · each hen's dot pulls a trail of her last 6 s · bar at the bottom: yellow = this piece, white = now · `
+                             : `yellow box = this piece · ● hen seen · ◯ moving with her pixels · faint ring = not seen, waiting where last seen · `)
+      + `speed ${[0.25, 0.5, 1].map(r => `<button class="act spd" data-r="${r}" style="padding:1px 6px">${r}×</button>`).join(" ")}`;
+    const m = document.createElement("div"); m.innerHTML = modes;
+    box.replaceChildren(m.firstElementChild, v, legend);
+    bindWhereMode(q, w);
+    legend.querySelectorAll(".spd").forEach(b => b.onclick = () => { v.playbackRate = +b.dataset.r;
+      legend.querySelectorAll(".spd").forEach(x => x.classList.toggle("on", x === b)); });
+  } catch { $("#wvidmsg") && ($("#wvidmsg").textContent = "couldn't make the video"); }
+}
+
+// trace: follow the bird piece by piece backwards / forwards until a piece that's certain
+async function showTrace(q, dir) {
+  const box = $("#tracebox");
+  box.style.display = "block"; box.innerHTML = `<div class="meta">tracing…</div>`;
+  let tr;
+  try { tr = await (await fetch(`api/trace/${q.track}?v=${S.version}`)).json(); } catch { box.innerHTML = ""; return toast("Trace failed", 5000); }
+  const hops = tr[dir], back = dir === "back";
+  const badge = h => h.by === "you" ? (h.sure ? "✓ you confirmed" : "you set aside")
+                   : h.by === "recogniser" ? `🤖 ${Math.round(h.p * 100)}% sure`
+                   : h.rec && h.p != null ? `guess · 🤖 says ${esc(h.rec)} ${Math.round(h.p * 100)}%` : "guess";
+  const card = h => `<div class="tcard${h.sure ? " sure" : ""}${h.ambiguous ? " amb" : ""}">
+      <img src="strip/${h.track}/${h.join_frame}.jpg?v=${S.version}" style="height:90px;display:block">
+      <b>#${h.track} ${esc(h.name)}</b><div class="meta">${badge(h)}</div>
+      <div class="meta">${h.gap_s}s gap${h.gap_s > 4 ? " (stayed put, not seen)" : ""} · ${h.dist_bodies <= 0.5 ? "same spot" : `${h.dist_bodies} body lengths away`}${h.dist_bodies > 2 ? " ⚠ far" : ""}</div>
+      ${h.ambiguous ? `<div class="meta warn">⚠ could also be #${h.alt} ${esc(h.alt_name || "")}</div>` : ""}</div>`;
+  const me = `<div class="tcard me"><img src="strip/${q.track}/${q.strip[back ? 0 : q.strip.length - 1]}.jpg?v=${S.version}" style="height:90px;display:block">
+      <b>this piece</b><div class="meta">#${q.track}, asking: ${esc(q.name)}?</div></div>`;
+  const arrow = `<div class="tarrow">→</div>`;
+  const anchor = hops.find(h => h.anchor), names = new Set(hops.filter(h => h.chicken != null).map(h => h.name));
+  const amb = hops.some(h => h.ambiguous), far = hops.some(h => h.dist_bodies > 2);
+  let verdict;
+  if (!hops.length) verdict = `<b>Nothing links ${back ? "before" : "after"} this piece</b> — no bird ${back ? "left off" : "picked up"} nearby within 4 s, or in the same spot within 30 s. She ${back ? "comes into view" : "leaves the view"} here (or from behind something), so tracing can't help — play the piece instead.`;
+  else if (!anchor) verdict = `Followed ${hops.length} step${hops.length > 1 ? "s" : ""} without reaching a piece that's certain.`;
+  else verdict = `${back ? "Comes from" : "Goes on to"} <b>${esc(anchor.name)}</b> (${badge(anchor)}) in ${hops.length} step${hops.length > 1 ? "s" : ""}` +
+                 (amb || far || names.size > 1 ? " — but check: " + [amb && "another bird was close at a link", far && "a long jump",
+                   names.size > 1 && "the names along the way disagree"].filter(Boolean).join(", ") : " — a clean link.");
+  const row = back ? [...hops].reverse().map(card).concat(me) : [me, ...hops.map(card)];
+  box.innerHTML = `<div class="meta" style="margin-bottom:4px">${back ? "⏪ Back in time" : "Forward in time ⏩"}: ${verdict}</div>
+    <div class="trow">${row.join(arrow)}</div>
+    <div class="answers" style="margin-top:4px">
+      ${hops.length ? `<button class="act" id="tplay">▶ Play the chain</button>` : ""}
+      ${anchor && anchor.chicken != null ? `<button class="act yes" id="tuse">It's ${esc(anchor.name)}</button>` : ""}
+      <button class="act" id="tclose">close</button></div>`;
+  $("#tclose").onclick = () => { box.style.display = "none"; };
+  $("#tplay") && ($("#tplay").onclick = () => playPiece(q.track, dir));
+  $("#tuse") && ($("#tuse").onclick = () => api("api/answer", { track: q.track, chicken: anchor.chicken,
+                                                         verdict: anchor.chicken === q.chicken ? "yes" : "moved" }));
+}
+
+// a short video of the piece, made on the server; loaded as a blob so every browser can seek in it
+async function playPiece(track, dir = "") {
+  const box = $("#clipbox"), v = $("#clipv"), key = `${track}${dir}`;
+  if (box.style.display !== "none" && v.dataset.t == key) { v.paused ? v.play() : v.pause(); return; }
+  toast(dir ? "Making the video of the whole chain…" : "Making the clip…", 60000);
+  $("#play").textContent = "⏳ making the clip…";
+  try {
+    const r = await fetch(`clip/${track}.mp4?v=${S.version}${dir ? `&dir=${dir}` : ""}`);
+    if (!r.ok) throw new Error();
+    if (v.src) URL.revokeObjectURL(v.src);
+    v.src = URL.createObjectURL(await r.blob()); v.dataset.t = key; toast("Playing ▶", 800);
+    box.style.display = "block"; v.play();
+    document.querySelectorAll(".spd").forEach(b => b.onclick = () => { v.playbackRate = +b.dataset.r;
+      document.querySelectorAll(".spd").forEach(x => x.classList.toggle("on", x === b)); });
+  } catch { toast("Couldn't make the clip", 5000); }
+  finally { $("#play") && ($("#play").innerHTML = "▶ Play this piece <kbd>V</kbd>"); }
 }
 
 function renderAsk() {
@@ -294,13 +498,27 @@ function renderAsk() {
           <button class="act" id="u" title="A hen, but too little of her is visible to tell which">Can't tell which hen <kbd>U</kbd></button>
           <button class="act" id="c">New chicken <kbd>C</kbd></button>
         </div>
+        <div class="answers" style="margin-top:0"><button class="act" id="play">▶ Play this piece <kbd>V</kbd></button>
+          <button class="act" id="tback" title="Follow her backwards to a piece that's certain">⏪ Trace back <kbd>B</kbd></button>
+          <button class="act" id="tfwd" title="Follow her forwards to a piece that's certain">Trace forward ⏩ <kbd>F</kbd></button></div>
+        <div id="tracebox" style="display:none;margin:6px 0 10px"></div>
+        <div id="where" class="where"><div class="meta">Where were the hens? …</div></div>
+        <div id="clipbox" style="display:none;margin:6px 0 10px">
+          <video id="clipv" controls loop muted playsinline style="max-width:100%;border-radius:6px;background:#000"></video>
+          <div class="answers" style="margin-top:4px"><span class="meta">speed</span>
+            ${[0.25, 0.5, 1, 2].map(r => `<button class="act spd" data-r="${r}">${r}×</button>`).join("")}
+            <span class="meta">her box is yellow, other birds grey</span></div></div>
         <div class="meta" style="margin-bottom:6px">…or it's actually:</div>
         <div class="answers" style="margin-top:0">${others.map((c, i) =>
           `<button class="act" data-c="${c.id}">${i < 9 ? `<kbd>${i + 1}</kbd> ` : ""}${esc(label(c))}</button>`).join("")}</div>
         <div class="meta" style="margin-top:14px">Changes bird part-way? Pick what to mark with, click or drag across the
-          pictures it applies to, then <b>Accept</b> — the piece is cut where your marks change. Unmarked pictures stay ${esc(q.name)}.</div>
-        <div class="brushes">${[...S.chickens.map(c => [`c${c.id}`, label(c)]), ["unsure", "can't tell"], ["not_chicken", "not a chicken"],
+          pictures it applies to, then <b>Accept</b> — the piece is cut where your marks change. Unmarked pictures stay ${esc(q.name)}.
+          The second row marks the box on top of that: only part of the hen in it, or the box catches too much.</div>
+        <div class="brushes"><span class="lbl">Bird</span>${[...S.chickens.map(c => [`c${c.id}`, label(c)]), ["unsure", "can't tell"], ["not_chicken", "not a chicken"],
           ["multiple", "several"]].map(([k, n]) => `<button class="act brush" data-b="${k}" style="--bc:${markColour(k)}">${esc(n)}</button>`).join("")}</div>
+        <div class="brushes"><span class="lbl">Box</span>
+          <button class="act brush box" data-b="box:partial" style="--bc:#bbb" title="Only part of the hen is in the picture">◐ only part of her</button>
+          <button class="act brush box" data-b="box:loose" style="--bc:#bbb" title="Mostly her, but the box catches a bit of a neighbour">◑ box too big</button></div>
         <div class="film paint">${q.strip.map(f => `<div class="pic" data-f="${f}"><img src="strip/${q.track}/${f}.jpg?v=${S.version}"
           draggable="false" style="height:100px"><span class="tag"></span></div>`).join("")}</div>
         <div class="answers" id="markbar" style="display:none;margin-top:8px">
@@ -320,7 +538,11 @@ function renderAsk() {
   $("#c").onclick = () => ans("new", null);
   document.querySelectorAll("button[data-c]").forEach(b => b.onclick = () => ans("moved", +b.dataset.c));
   bindMarking(q);
-  window._keys = { y: () => ans("yes", q.chicken), n: () => ans("no", q.chicken), x: () => ans("not_chicken", null),
+  loadWhere(q);
+  $("#play").onclick = () => playPiece(q.track);
+  $("#tback").onclick = () => showTrace(q, "back");
+  $("#tfwd").onclick = () => showTrace(q, "forward");
+  window._keys = { v: () => playPiece(q.track), b: () => showTrace(q, "back"), f: () => showTrace(q, "forward"), y: () => ans("yes", q.chicken), n: () => ans("no", q.chicken), x: () => ans("not_chicken", null),
                    m: () => ans("multiple", null), p: () => ans("partial", q.chicken),
                    l: () => ans("loose", q.chicken), u: () => ans("unsure", null),
                    c: () => ans("new", null) };
@@ -416,9 +638,10 @@ window.addEventListener("keydown", e => {
   const z = $("#zoom");
   if (z && z.style.display === "flex") { if (e.key === "Escape") closeGap(); return; }  // no answer keys while zoomed
   if (tab !== "ask" || e.target.tagName === "INPUT" || !window._keys) return;
-  const f = window._keys[e.key.toLowerCase()]; if (f) { e.preventDefault(); window._keys = null; f(); }
+  const f = window._keys[e.key.toLowerCase()]; if (f) { e.preventDefault(); if (!"vbf".includes(e.key.toLowerCase())) window._keys = null; f(); }
 });
-document.querySelectorAll(".tab").forEach(b => b.onclick = () => { tab = b.dataset.tab; sel = null; render(); });
+document.querySelectorAll(".tab").forEach(b => b.onclick = () => { tab = b.dataset.tab; sel = null;
+  history.replaceState(null, "", "#" + tab); render(); });
 async function undo() {
   if (!S.undo.count) return toast("Nothing to undo");
   sel = null;

@@ -501,7 +501,7 @@ def overlap_snapshot(video: str, det: pd.DataFrame, a: int, b: int, k: int = 1, 
         cv2.putText(img, lab, (p1[0] + 4, p1[1] + 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 6, cv2.LINE_AA)
         cv2.putText(img, lab, (p1[0] + 4, p1[1] + 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, col, 2, cv2.LINE_AA)
     crop = img[y1:y2, x1:x2]
-    out = cv2.resize(crop, (width, int(crop.shape[0] * width / crop.shape[1])))
+    out = resize(crop, (width, int(crop.shape[0] * width / crop.shape[1])))
     t = int(f / fps)
     label = f"{t // 60:02d}:{t % 60:02d}"
     cv2.putText(out, label, (8, out.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4, cv2.LINE_AA)
@@ -679,6 +679,12 @@ def mark_segments(det: pd.DataFrame, track: int, marks: list[tuple[int, str]]) -
     return cuts, labels
 
 
+def resize(img: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """cv2.resize on a copy in its own memory. OpenCV 5.0.0 on Apple silicon segfaults resizing some
+    cut-outs of a bigger frame (e.g. 545x267 -> 544x266 at the bottom edge); a contiguous copy doesn't."""
+    return cv2.resize(np.ascontiguousarray(img), size)
+
+
 def piece_frame(video: str, det: pd.DataFrame, track: int, frame: int, fps: float,
                 margin: int = 90, height: int = 170, wide: bool = False) -> bytes | None:
     """JPEG of the piece's box at one frame, with surroundings, for filmstrips.
@@ -703,12 +709,158 @@ def piece_frame(video: str, det: pd.DataFrame, track: int, frame: int, fps: floa
     cv2.rectangle(img, p1, p2, (0, 0, 0), 5)
     cv2.rectangle(img, p1, p2, (255, 255, 255), 2)
     crop = img[max(0, p1[1] - margin):min(H, p2[1] + margin), max(0, p1[0] - margin):min(W, p2[0] + margin)]
-    out = cv2.resize(crop, (int(crop.shape[1] * height / crop.shape[0]), height))
+    out = resize(crop, (int(crop.shape[1] * height / crop.shape[0]), height))
     t = int(frame / fps)
     lab = f"{t // 60:02d}:{t % 60:02d}" + (f".{int(10 * frame / fps) % 10}" if wide else "")
     cv2.putText(out, lab, (5, height - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 4, cv2.LINE_AA)
     cv2.putText(out, lab, (5, height - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
     return cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes()
+
+
+def piece_clip(video: str, det: pd.DataFrame, track: int, fps: float, pad_s: float = 1.5,
+               max_s: float = 90.0, width: int = 960, chain: dict[int, str] | None = None,
+               span: tuple[int, int] | None = None, extra_pts=None, draw_extra=None,
+               step: int = 1, draw_after=None) -> bytes | None:
+    """Short MP4 (H.264) of one piece: from a moment before to a moment after, cropped to the part of
+    the yard she moves through, her box in yellow and the other boxes in grey. Long pieces are cut at max_s.
+    chain: other pieces to follow too ({track: label}, drawn in cyan); span: (first, last) frame to show.
+    extra_pts: more (x, y) points the view must include; draw_extra(img, frame): more drawing per frame;
+    step: keep every step-th frame (step 4 = plays 4x fast); draw_after(out_img, frame, to_out): drawing on
+    the final (cropped, resized) picture, so marks and text keep their size; to_out(x, y) maps video pixels."""
+    import subprocess
+    from .player import ffmpeg_exe
+    chain = chain or {}
+    d = det[det.track_id.isin([track, *chain])].sort_values("frame")
+    if d.empty:
+        return None
+    cap = cv2.VideoCapture(video)
+    W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if span:
+        f0, f1 = max(0, int(span[0])), int(span[1])
+        if f1 - f0 > max_s * fps:  # keep the end nearest the piece in question
+            mine = det.loc[det.track_id == track, "frame"]
+            f0, f1 = (f1 - int(max_s * fps), f1) if mine.min() > (f0 + f1) / 2 else (f0, f0 + int(max_s * fps))
+        d = d[(d.frame >= f0) & (d.frame <= f1)]
+    else:
+        f0 = max(0, int(d.frame.iloc[0] - pad_s * fps))
+        f1 = min(int(d.frame.iloc[-1] + pad_s * fps), f0 + int(max_s * fps))
+    bw, bh = float((d.x2 - d.x1).median()), float((d.y2 - d.y1).median())
+    m = max(200.0, 1.5 * max(bw, bh))
+    xs, ys = [d.x1.min(), d.x2.max()], [d.y1.min(), d.y2.max()]
+    for px, py in (extra_pts or []):
+        xs.append(px), ys.append(py)
+    x1, x2 = max(0, int(min(xs) - m)), min(W, int(max(xs) + m))
+    y1, y2 = max(0, int(min(ys) - m)), min(H, int(max(ys) + m))
+    want = 16 / 9  # widen the short side towards 16:9 so the view isn't a sliver
+    if (x2 - x1) / (y2 - y1) < want:
+        grow = int((y2 - y1) * want) - (x2 - x1)
+        x1, x2 = max(0, x1 - grow // 2), min(W, x2 + grow - grow // 2)
+    else:
+        grow = int((x2 - x1) / want) - (y2 - y1)
+        y1, y2 = max(0, y1 - grow // 2), min(H, y2 + grow - grow // 2)
+    ow = min(width, x2 - x1) // 2 * 2
+    oh = int(round(ow * (y2 - y1) / (x2 - x1))) // 2 * 2
+    near = det[(det.frame >= f0) & (det.frame <= f1)]
+    by_frame = {f: g for f, g in near.groupby("frame")}
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "clip.mp4"
+        proc = subprocess.Popen([ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo",
+                                 "-pix_fmt", "bgr24", "-s", f"{ow}x{oh}", "-r", f"{fps:.3f}", "-i", "-",
+                                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+                                 "-movflags", "+faststart", str(out)], stdin=subprocess.PIPE)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, f0)
+        for f in range(f0, f1 + 1):
+            if (f - f0) % step:
+                if not cap.grab():  # skipped frame: decode only, nothing drawn
+                    break
+                continue
+            ok, img = cap.read()
+            if not ok:
+                break
+            for o in by_frame.get(f, pd.DataFrame()).itertuples():
+                mine, linked = o.track_id == track, o.track_id in chain
+                p1, p2 = (int(o.x1), int(o.y1)), (int(o.x2), int(o.y2))
+                if mine or linked:
+                    cv2.rectangle(img, p1, p2, (0, 0, 0), 6)
+                    cv2.rectangle(img, p1, p2, (0, 215, 255) if mine else (255, 220, 0), 3)
+                    lab = "this piece" if mine else chain[o.track_id]
+                    cv2.putText(img, lab, (p1[0], p1[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 6, cv2.LINE_AA)
+                    cv2.putText(img, lab, (p1[0], p1[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA)
+                else:
+                    cv2.rectangle(img, p1, p2, (160, 160, 160), 1)
+            if draw_extra:
+                draw_extra(img, f)
+            frame = resize(img[y1:y2, x1:x2], (ow, oh))
+            t = f / fps
+            lab = f"{int(t) // 60:02d}:{int(t) % 60:02d}.{int(10 * t) % 10}"
+            cv2.putText(frame, lab, (8, oh - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4, cv2.LINE_AA)
+            cv2.putText(frame, lab, (8, oh - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1, cv2.LINE_AA)
+            if draw_after:  # to_out maps video pixels to this picture's pixels
+                draw_after(frame, f, lambda x, y: (int((x - x1) * ow / (x2 - x1)), int((y - y1) * oh / (y2 - y1))))
+            proc.stdin.write(frame.tobytes())
+        cap.release()
+        proc.stdin.close()
+        if proc.wait() != 0 or not out.exists():
+            return None
+        return out.read_bytes()
+
+
+def trace(det: pd.DataFrame, track: int, direction: int, fps: float, is_anchor=lambda t: False,
+          max_hops: int = 8, max_gap_s: float = 4.0, speed: float = 1.5, overlap_frames: int = 3,
+          still_gap_s: float = 30.0, still_dist: float = 0.5) -> list[dict]:
+    """Follow a bird from piece to piece, backwards (direction -1) or forwards (+1) in time.
+
+    From the piece's first box (back) / last box (forward), the link is the piece that ended just
+    before / started just after, nearby: within 1 body length plus `speed` body lengths per second of
+    gap. A hen sitting still is often lost by the detector for a while, so a piece that picks up in
+    the same spot (within still_dist body lengths) links across up to still_gap_s. The best link wins; if another one is almost as good the hop is marked ambiguous. Stops at a
+    piece `is_anchor` says is certain, when nothing links, or after max_hops.
+    """
+    g = det.sort_values("frame").groupby("track_id")
+    ends = pd.DataFrame({"first": g.frame.first(), "last": g.frame.last()})
+    box = lambda r: (np.array([(r.x1 + r.x2) / 2, (r.y1 + r.y2) / 2]), float(np.hypot(r.x2 - r.x1, r.y2 - r.y1)))
+    first_row, last_row = g.head(1).set_index("track_id"), g.tail(1).set_index("track_id")
+    hops, seen, cur = [], {track}, track
+    window = max(max_gap_s, still_gap_s)
+    while len(hops) < max_hops and cur in ends.index:
+        if direction < 0:
+            t0 = ends.at[cur, "first"]
+            cand = ends[(ends["last"] < t0 + overlap_frames) & (ends["last"] >= t0 - window * fps)
+                        & (ends["first"] < t0)]
+            here, there = first_row.loc[cur], last_row
+            gap = lambda c: (t0 - ends.at[c, "last"]) / fps
+        else:
+            t1 = ends.at[cur, "last"]
+            cand = ends[(ends["first"] > t1 - overlap_frames) & (ends["first"] <= t1 + window * fps)
+                        & (ends["last"] > t1)]
+            here, there = last_row.loc[cur], first_row
+            gap = lambda c: (ends.at[c, "first"] - t1) / fps
+        p, size = box(here)
+        scored = []
+        for c in cand.index:
+            if c in seen:
+                continue
+            q, size2 = box(there.loc[c])
+            body = max(1.0, (size + size2) / 2)
+            dist, gs = float(np.linalg.norm(p - q)) / body, max(0.0, gap(c))
+            if (gs <= max_gap_s and dist <= 1.0 + speed * gs) or (gs <= still_gap_s and dist <= still_dist):
+                scored.append((dist + 0.5 * gs, c, dist, gs))
+        if not scored:
+            break
+        scored.sort()
+        sc, c, dist, gs = scored[0]
+        alt = scored[1][1] if len(scored) > 1 and scored[1][0] - sc < 0.5 else None
+        hop = {"track": int(c), "gap_s": round(gs, 1), "dist_bodies": round(dist, 2),
+               "ambiguous": alt is not None, "alt": None if alt is None else int(alt),
+               "join_frame": int(ends.at[c, "last"] if direction < 0 else ends.at[c, "first"]),
+               "first": int(ends.at[c, "first"]), "last": int(ends.at[c, "last"])}
+        hops.append(hop)
+        seen.add(c)
+        cur = c
+        if is_anchor(int(c)):
+            hop["anchor"] = True
+            break
+    return hops
 
 
 def load_fragments(run_dir: Path) -> dict[int, Frag]:

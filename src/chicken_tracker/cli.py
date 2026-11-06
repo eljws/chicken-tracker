@@ -184,6 +184,17 @@ def cmd_pecks(a: argparse.Namespace) -> None:
     print(write_pecking(a.run_dir, video=str(a.video) if a.video else None))
 
 
+def cmd_dots(a: argparse.Namespace) -> None:
+    from collections import Counter
+
+    from .dots import compute
+
+    out = compute(a.run_dir, video=str(a.video) if a.video else None)
+    kinds = Counter(e["kind"] for e in out["illegal"])
+    print(f"{len(out['illegal'])} illegal moves: " + (", ".join(f"{n} {k}" for k, n in kinds.items()) or "none"))
+    print("Switch on \"Dots\" in the player to see them.")
+
+
 def cmd_clean(a: argparse.Namespace) -> None:
     from .identity import clean_ghost_boxes
 
@@ -411,6 +422,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("run_dir", type=Path)
     p.add_argument("--video", type=Path, help="source video, if it moved since `process`")
     p.set_defaults(func=cmd_pecks)
+
+    p = sub.add_parser("dots", help="one dot per hen in every frame (follows pixels when she's lost) "
+                                    "+ moves no hen can make - needs naming first")
+    p.add_argument("run_dir", type=Path)
+    p.add_argument("--video", type=Path, help="source video, if it moved since `process`")
+    p.set_defaults(func=cmd_dots)
 
     p = sub.add_parser("models", help="list model versions; switch which one is in use; check the files")
     p.add_argument("kind", nargs="?", help="detector, recognizer, pose or seg (default: all)")
