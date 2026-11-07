@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Rodents · Chicken tracker</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg: #121212; --panel: #1c1c1c; --line: #2e2e2e; --text: #eaeaea; --muted: #9a9a9a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; background: var(--panel); border-bottom: 1px solid var(--line); padding: 10px 16px; }
+  h1 { font-size: 16px; margin: 0 12px 0 0; font-weight: 600; display: inline; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .muted { color: var(--muted); font-size: 12px; }
+  button { background: #2a2a2a; color: var(--text); border: 1px solid #444; border-radius: 6px; padding: 3px 10px; cursor: pointer; font-size: 13px; }
+  button:hover { background: #363636; } button.on { background: #3b5bdb; border-color: #3b5bdb; }
+  .chip.on { background: #3b5bdb; border-color: #3b5bdb; }
+  main { padding: 12px 16px; display: grid; grid-template-columns: repeat(auto-fill, minmax(540px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+  .card.hover { border-color: #5c7cfa; }
+  .card .media { width: 100%; cursor: pointer; position: relative; }
+  .card .media img { width: 100%; height: auto; display: block; border-radius: 4px; }
+  .card .media video { width: 100%; max-height: 420px; object-fit: contain; display: block; background: #000; border-radius: 4px; }
+  .card .media .play { position: absolute; right: 6px; bottom: 6px; background: rgba(0,0,0,.7); padding: 1px 8px; border-radius: 4px; font-size: 12px; }
+  .head { display: flex; gap: 8px; align-items: baseline; margin-bottom: 6px; }
+  .head b { font-variant-numeric: tabular-nums; }
+  .labs { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+  .labs button { font-size: 12px; padding: 2px 8px; }
+  .labs button.cur { background: #2f7d32; border-color: #43a047; }
+  .labs button.cur.bot { background: #4a3b10; border-color: #b8860b; }
+  a { color: #90caf9; }
+  #nights { margin-top: 8px; }
+  .night { display: inline-flex; gap: 6px; align-items: center; margin-right: 18px; }
+  .hours { display: inline-flex; align-items: flex-end; gap: 1px; height: 22px; }
+  .hours i { width: 6px; background: #8d6e63; display: inline-block; }
+  #empty { padding: 30px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <div class="row">
+    <h1>🐀 Rodents at night</h1>
+    <span class="muted" id="sub"></span>
+    <span style="margin-left:auto" class="row">
+      <button id="confirm" title="Every picture shown that has Claude's answer: keep that answer, now as yours">✓ Confirm Claude's answers shown</button>
+      <button id="scan" title="Look for movers in infrared recordings not scanned yet">↻ Scan new recordings</button><span class="muted" id="scanst"></span>
+    </span>
+  </div>
+  <div class="row" style="margin-top:8px" id="filters"></div>
+  <div id="nights" class="muted"></div>
+  <div class="muted" style="margin-top:6px">Every moving thing found in the infrared footage. 🤖 = Claude's answer from the pictures (yellow) — click the right
+    label to make it yours (green). Hover a card and press <b>1–7</b> for the labels; click the pictures to play the moment.</div>
+</header>
+<main id="main"></main>
+<div id="empty" style="display:none">Nothing here.</div>
+<script>
+const $ = s => document.querySelector(s);
+const NAMES = { rat: "🐀 rat", other_animal: "🦊 other animal", insect: "🪲 insect", person: "🧍 person", light: "💡 light", nothing: "· nothing", unsure: "? unsure" };
+let D = null, F = localStorage.getItem("rod.filter") || "check", hover = null;
+const pad = n => String(n).padStart(2, "0");
+const fmt = iso => { const d = new Date(iso); return `${d.toLocaleDateString(undefined, { day: "numeric", month: "short" })} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+async function load(resp) { D = resp || await (await fetch("api")).json(); render(); }
+const FILTERS = () => {
+  const ev = D.events, n = f => ev.filter(f).length;
+  return [["check", "🤖 to check", e => e.by === "claude"], ["rat", "🐀 rats", e => e.label === "rat"],
+    ...D.kinds.filter(k => k !== "rat").map(k => [k, NAMES[k], e => e.label === k]),
+    ["yours", "✓ yours", e => e.label && e.by !== "claude"], ["todo", "not sorted", e => !e.label], ["all", "all", () => true]]
+    .map(([k, name, f]) => ({ k, name, f, n: n(f) }));
+};
+function render() {
+  const fs = FILTERS(), cur = fs.find(f => f.k === F) || fs[0];
+  $("#filters").innerHTML = fs.map(f => `<button class="chip ${f.k === cur.k ? "on" : ""}" data-f="${f.k}">${f.name} <span class="muted">${f.n}</span></button>`).join("");
+  document.querySelectorAll("[data-f]").forEach(b => b.onclick = () => { F = b.dataset.f; localStorage.setItem("rod.filter", F); render(); });
+  const rats = D.events.filter(e => e.label === "rat");
+  $("#sub").textContent = `${D.events.length} movers found · ${rats.length} rats · ${D.events.filter(e => e.by === "claude").length} of Claude's answers to check`;
+  // rat visits per night, by hour (18:00 -> 08:00)
+  const nights = {};
+  for (const e of rats) { const d = e.day || e.at.slice(0, 10), h = new Date(e.at).getHours(); (nights[d] = nights[d] || Array(24).fill(0))[h]++; }
+  const order = [...Array(24).keys()].map(i => (i + 12) % 24);
+  $("#nights").innerHTML = Object.entries(nights).map(([d, hs]) => `<span class="night" title="rats per hour, noon to noon">night after ${new Date(d + "T12:00").toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" })}:
+    <b>${hs.reduce((a, b) => a + b, 0)}</b><span class="hours">${order.map(h => `<i title="${pad(h)}:00 — ${hs[h]}" style="height:${hs[h] ? 3 + hs[h] * 3 : 1}px;${hs[h] ? "" : "background:#333"}"></i>`).join("")}</span></span>`).join("");
+  const list = D.events.filter(cur.f);
+  $("#empty").style.display = list.length ? "none" : "block";
+  $("#main").innerHTML = list.map(e => `<div class="card" data-id="${encodeURIComponent(e.id)}">
+      <div class="head"><b>${fmt(e.at)}</b><span class="muted">${e.secs} s · ${e.file.split("/")[1]}</span>
+        ${e.day ? `<a class="muted" href="../timeline/#day=${e.day}&t=${e.at}" target="_blank" style="margin-left:auto">🎞 timeline ↗</a>` : ""}</div>
+      <div class="media"><img loading="lazy" width="720" height="180" src="tile/${encodeURIComponent(e.id)}.jpg"><span class="play">▶ play</span></div>
+      <div class="labs">${D.kinds.map((k, i) => `<button data-l="${k}" class="${e.label === k ? "cur" + (e.by === "claude" ? " bot" : "") : ""}">${NAMES[k]}${e.label === k && e.by === "claude" ? " 🤖" : ""} <span class="muted">${i + 1}</span></button>`).join("")}</div>
+    </div>`).join("");
+  document.querySelectorAll(".card").forEach(c => {
+    const id = decodeURIComponent(c.dataset.id);
+    c.onmouseenter = () => { hover = id; c.classList.add("hover"); }; c.onmouseleave = () => { hover = null; c.classList.remove("hover"); };
+    c.querySelectorAll("[data-l]").forEach(b => b.onclick = () => label([id], b.dataset.l));
+    c.querySelector(".media").onclick = () => {
+      const m = c.querySelector(".media");
+      if (m.querySelector("video")) { const v = m.querySelector("video"); v.paused ? v.play() : v.pause(); return; }
+      c.classList.add("playing");
+      m.innerHTML = `<video src="clip/${encodeURIComponent(id)}.mp4" autoplay loop muted playsinline controls></video>`;
+    };
+  });
+}
+async function label(ids, l) {
+  const r = await fetch("label", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids, label: l }) });
+  const keep = scrollY; await load(await r.json()); scrollTo(0, keep);
+}
+$("#confirm").onclick = async () => {
+  const cur = FILTERS().find(f => f.k === F), shown = D.events.filter(cur.f).filter(e => e.by === "claude");
+  if (!shown.length) return;
+  if (!confirm(`Keep Claude's answers for the ${shown.length} pictures shown, now as yours?`)) return;
+  const by = {}; shown.forEach(e => (by[e.label] = by[e.label] || []).push(e.id));
+  for (const [l, ids] of Object.entries(by)) await fetch("label", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids, label: l }) });
+  load();
+};
+addEventListener("keydown", e => {
+  if (!hover || e.metaKey || e.ctrlKey) return;
+  const i = "1234567".indexOf(e.key); if (i >= 0 && D.kinds[i]) label([hover], D.kinds[i]);
+});
+$("#scan").onclick = async () => {
+  await fetch("scan", { method: "POST" });
+  const poll = setInterval(async () => { const j = await (await fetch("api")).json(); const s = j.scan;
+    $("#scanst").textContent = s.running ? `scanning ${s.done}/${s.total || "…"}` : s.error ? `scan failed: ${s.error}` : "done";
+    if (!s.running) { clearInterval(poll); load(j); } }, 2000);
+};
+load();
+</script>
+</body>
+</html>

@@ -9,6 +9,7 @@ clips under one address, plus progress, frame review and skeleton labelling.
     /run/<run>/clips/                  short clips of set-aside pieces, if made
     /metrics/                          per-hen charts for a day: distance, activity, runs
     /hens/                             every hen's pictures from all clips, grouped, to look her over
+    /rodents/                          movers found at night (rats...), to sort for the rodent detector
     /timeline/                         all recordings as one video, dawn and dusk marked, day = dawn to dawn
 
 The pages are the same ones the single-purpose servers show: each request is handed to that
@@ -299,6 +300,31 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
                 day = (parse_qs(query).get("day") or [days[-1] if days else ""])[0]
                 body = Mx.day_metrics(root, all_runs, day) if day else {}
                 return self._send(json.dumps({"days": days, **body}).encode(), "application/json")
+            if path == "/rodents":
+                return self._redirect(f"/rodents/{q}")
+            if path == "/rodents/":
+                return self._send((resources.files("chicken_tracker") / "static" / "rodents.html").read_bytes(),
+                                  "text/html; charset=utf-8")
+            if path in ("/rodents/api", "/rodents/scan", "/rodents/label"):
+                from . import rodents as RD
+                if path == "/rodents/scan" and self.command == "POST":
+                    RD.scan_in_background(root)
+                if path == "/rodents/label" and self.command == "POST":
+                    body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or "{}")
+                    try:
+                        for eid in body.get("ids") or [body.get("id")]:
+                            RD.set_label(root, str(eid), body.get("label"))
+                    except ValueError as e:
+                        return self._send(json.dumps({"error": str(e)}).encode(), "application/json", 400)
+                RD.warm_tiles(root)
+                return self._send(json.dumps(RD.page_data(root)).encode(), "application/json")
+            m = re.fullmatch(r"/rodents/(tile|clip)/(.+)\.(jpg|mp4)", path)
+            if m:
+                from . import rodents as RD
+                e = next((e for e in RD.events(root) if e["id"] == unquote(m[2])), None)
+                b = (RD.tile(root, e) if m[1] == "tile" else RD.clip(root, e)) if e else None
+                return self._send(b, "image/jpeg" if m[1] == "tile" else "video/mp4", cache=m[1] == "tile") if b \
+                    else self._send(b"not found", "text/plain", 404)
             if path == "/timeline":
                 return self._redirect(f"/timeline/{q}")
             if path == "/timeline/":
