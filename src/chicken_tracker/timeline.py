@@ -354,7 +354,7 @@ def clip_hens(run: Path) -> dict | None:
         for _, r in pd.read_csv(run / "fast_moments.csv").iterrows():
             if r.speed_m_s >= RUN_MIN_M_S:
                     events.append({"kind": "run", "hen": r.chicken, "t": round(float(r.at_s), 2),
-                               "detail": f"{r.chicken} runs {r.speed_m_s:.1f} m/s"})
+                               "detail": f"{r.chicken} runs {r.speed_m_s:.1f} m/s", "speed": round(float(r.speed_m_s), 2)})
     if (run / "dots.json").exists():
         try:
             for e in json.loads((run / "dots.json").read_text()).get("illegal", []):

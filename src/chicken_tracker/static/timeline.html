@@ -26,6 +26,9 @@
   #top { top: 0; display: flex; align-items: center; gap: 10px; padding: 8px 14px 18px;
          background: linear-gradient(rgba(0,0,0,.8), rgba(0,0,0,0)); }
   #top h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  #top .nav { display: inline-flex; gap: 10px; margin-left: 6px; font-size: 13px; }
+  #top .nav a { color: #90caf9; text-decoration: none; white-space: nowrap; }
+  #top .nav a:hover { text-decoration: underline; }
   #clock { font-variant-numeric: tabular-nums; font-size: 22px; margin-left: auto; text-shadow: 0 1px 3px #000; }
   #phase { padding: 1px 8px; border-radius: 4px; font-size: 13px; }
   #phase.day { background: #4a4426; color: var(--dawn); } #phase.night { background: #1d2340; color: var(--dusk); }
@@ -62,6 +65,13 @@
   .ev { display: flex; gap: 6px; padding: 2px 4px; border-radius: 4px; cursor: pointer; font-size: 12px; align-items: baseline; }
   .ev:hover { background: #2a2a2a; } .ev.past { opacity: .55; } .ev.next { background: #2f3a5a; }
   .ev .tm { font-variant-numeric: tabular-nums; color: var(--muted); flex: none; width: 58px; }
+  /* speed of a run: a lollipop per row, so the rows read as a plot running down the list */
+  .ev .spd { margin-left: auto; flex: none; width: 90px; height: 10px; position: relative; align-self: center;
+             background: linear-gradient(#333, #333) left center / 100% 1px no-repeat; }
+  .ev .spd i { position: absolute; left: 0; top: 4px; height: 2px; background: #ffb74d; border-radius: 1px; }
+  .ev .spd i::after { content: ""; position: absolute; right: -4px; top: -3px; width: 8px; height: 8px; border-radius: 50%; background: #ffb74d; }
+  .ev.top .spd i, .ev.top .spd i::after { background: #ff7043; } .ev.top > span:nth-of-type(3) { font-weight: 600; }
+  #evscale { display: flex; justify-content: flex-end; font-size: 11px; color: var(--muted); padding-right: 4px; }
 </style>
 </head>
 <body>
@@ -85,6 +95,7 @@
   <span class="muted" id="dayinfo"></span>
   <span id="phase"></span>
   <span id="clock">--:--:--</span>
+  <span class="nav"><a href="../hens/" target="_blank">🐔 Hens</a><a href="../metrics/" target="_blank">📊 Metrics</a><a href="../rodents/" target="_blank">🐀 Rodents</a><a href="../status/" target="_blank" title="Clips, processing steps, naming and labelling">⚙ Status</a></span>
   <button id="bpanel" title="Layers, hens and events (L)">☰ Layers</button>
   <button id="bfull" title="Full screen (F)">⛶</button>
 </div>
@@ -115,7 +126,9 @@
   <div class="row" style="margin-bottom:4px"><select id="evfilter">
     <option value="all">everything</option><option value="illegal">⚠ illegal moves</option><option value="run">🏃 fast runs</option>
     <option value="marker">☀🌙 dawn / dusk</option></select>
+    <select id="evsort" title="Order of the list"><option value="time">in time order</option><option value="speed">fastest first</option></select>
     <label class="muted"><input type="checkbox" id="evhen"> only the chosen hen</label></div>
+  <div id="evscale"></div>
   <div id="events"></div>
   <h2>Recordings</h2>
   <div class="muted">☀ dawn = the camera switches from infrared to colour, 🌙 dusk = back to infrared; a day runs from one dawn to the next.
@@ -393,27 +406,36 @@ function nowState() {
 }
 function allEvents() {
   const out = dayMarkers().map(m => ({ kind: "marker", t: ms(m.at), text: m.kind === "dawn" ? "☀ dawn — colour" : "🌙 dusk — infrared" }));
-  if (HV) for (const c of HV.clips) for (const e of c.events) out.push({ kind: e.kind, hen: e.hen, t: c.s + e.t * 1000, text: (e.kind === "illegal" ? "⚠ " : "🏃 ") + e.detail });
+  if (HV) for (const c of HV.clips) for (const e of c.events) out.push({ kind: e.kind, hen: e.hen, t: c.s + e.t * 1000, text: (e.kind === "illegal" ? "⚠ " : "🏃 ") + e.detail,
+    speed: e.kind === "run" ? (e.speed != null ? e.speed : +((e.detail.match(/([\d.]+) m\/s/) || [])[1] || 0)) : null });
   return out.sort((a, b) => a.t - b.t);
 }
 function events(force) {
-  const f = $("#evfilter").value, onlyHen = $("#evhen").checked && focusName;
+  const f = $("#evfilter").value, onlyHen = $("#evhen").checked && focusName, bySpeed = $("#evsort").value === "speed";
   const list = allEvents().filter(e => (f === "all" || e.kind === f) && (!onlyHen || !e.hen || e.hen === focusName));
-  const key = f + onlyHen + list.length + (HV ? 1 : 0);
+  if (bySpeed) list.sort((a, b) => (b.speed || -1) - (a.speed || -1) || a.t - b.t);
+  const sp = list.map(e => e.speed || 0), top = Math.max(0, ...sp), lo = 0.8;  // the scale starts at the slowest speed counted as a run
+  const key = f + onlyHen + bySpeed + list.length + (HV ? 1 : 0);
   const box = $("#events");
   if (force || box._k !== key) {
     box._k = key;
-    box.innerHTML = list.length ? list.map((e, i) => `<div class="ev" data-i="${i}" data-t="${e.t}"><span class="tm">${hms(e.t)}</span>
-      ${e.hen && HV ? `<span class="dot" style="background:${(HV.hens.find(h => h.name === e.hen) || {}).color || "#888"};margin-top:3px"></span>` : ""}<span>${esc(e.text)}</span></div>`).join("")
+    const w = v => Math.max(4, Math.min(100, (v - lo) / Math.max(0.1, top - lo) * 100));
+    $("#evscale").innerHTML = top ? `<span style="width:90px;display:flex;justify-content:space-between"><span>${lo}</span><span>${top.toFixed(1)} m/s</span></span>` : "";
+    box.innerHTML = list.length ? list.map((e, i) => `<div class="ev${e.speed && e.speed === top ? " top" : ""}" data-i="${i}" data-t="${e.t}"
+      ${e.speed ? `title="${e.speed.toFixed(1)} m/s${e.speed === top ? " — fastest in this list" : ""}"` : ""}><span class="tm">${hms(e.t)}</span>
+      ${e.hen && HV ? `<span class="dot" style="background:${(HV.hens.find(h => h.name === e.hen) || {}).color || "#888"};margin-top:3px"></span>` : ""}<span>${esc(e.text)}</span>
+      ${e.speed ? `<span class="spd"><i style="width:${w(e.speed).toFixed(1)}%"></i></span>` : ""}</div>`).join("")
       : '<span class="muted">nothing</span>';
     box.querySelectorAll(".ev").forEach(el => el.onclick = () => seekWall(+el.dataset.t - 2000));
   }
   let nextDone = false;
   box.querySelectorAll(".ev").forEach(el => { const t = +el.dataset.t, past = t < wall - 1000;
-    const nx = !past && !nextDone; if (nx) nextDone = true;
-    el.classList.toggle("past", past); el.classList.toggle("next", nx); });
+    const nx = !bySpeed && !past && !nextDone; if (nx) nextDone = true;  // "next" only makes sense in time order
+    el.classList.toggle("past", past && !bySpeed); el.classList.toggle("next", nx); });
 }
 $("#evfilter").onchange = () => events(true); $("#evhen").onchange = () => events(true);
+$("#evsort").value = localStorage.getItem("tl.evsort") || "time";
+$("#evsort").onchange = () => { localStorage.setItem("tl.evsort", $("#evsort").value); events(true); };
 
 // ================================================================ the day bar
 const cv = $("#cv"), cx = cv.getContext("2d");

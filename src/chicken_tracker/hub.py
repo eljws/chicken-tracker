@@ -1,7 +1,8 @@
 """One web server for everything: a calendar of days, and each clip's player, naming page and
 clips under one address, plus progress, frame review and skeleton labelling.
 
-    /                                  home: calendar of days, clips per day, links
+    /                                  goes to /timeline/, the main page
+    /status/                           status: calendar of days, clips per day, steps, links
     /progress/                         live progress of every run
     /review/  /pose/                   label frames / skeletons (whole dataset)
     /run/<run>/player/                 a clip's player        (<run> = folder under output/,
@@ -256,7 +257,11 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
             path, _, query = raw.partition("?")
             q = f"?{query}" if query else ""
             if path in ("/", "/index.html"):
-                return self._send(home(), "text/html; charset=utf-8")
+                return self._redirect(f"/timeline/{q}")
+            if path == "/status":
+                return self._redirect(f"/status/{q}")
+            if path == "/status/":  # its links are written from the top ("api/home", "run/..."): <base> keeps them so
+                return self._send(home().replace(b"<head>", b'<head>\n<base href="/">', 1), "text/html; charset=utf-8")
             if path == "/api/recompute" and self.command == "POST":
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or "{}")
                 added = 0
