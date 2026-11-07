@@ -353,16 +353,17 @@ def predict_run(run_dir: Path, weights: Path, device: str | None = None, video: 
 
 
 def assign_pieces(verdict: dict, frags: dict, classes: list[str], min_p: float = 0.15,
-                  several_p: float = 0.5) -> tuple[list[list[int]], list[int], dict]:
+                  several_p: float = 0.5, placed: list[list] | None = None) -> tuple[list[list[int]], list[int], dict]:
     """verdict: {track: (mean probs over classes, n crops)} -> (tracks per hen, several pieces, report).
 
     Most certain pieces first; each to the likeliest hen not already elsewhere at that time.
+    `placed`: per hen, pieces already fixed (your confirmed ones), which the new ones must not overlap.
     """
     from .identity import _conflict
 
     hens = [c for c in classes if c != SEVERAL]
     tracks: list[list[int]] = [[] for _ in hens]
-    placed: list[list] = [[] for _ in hens]
+    placed = [list(p) for p in placed] if placed is not None else [[] for _ in hens]
     several: list[int] = []
     report = {"named": 0, "second_choice": 0, "several": 0, "conflict": 0}
     for t in sorted(verdict, key=lambda t: -(verdict[t][0].max() * np.log1p(verdict[t][1]))):
@@ -432,3 +433,54 @@ def auto_name(run_dir: Path, weights: Path, device: str | None = None, video: st
     store.save()
     export(run_dir)
     return report
+
+
+def piece_verdicts(pred: pd.DataFrame, classes: list[str]) -> dict:
+    cols = [f"p_{c}" for c in classes]
+    verdict = {}
+    for t, g in pred.groupby("track_id"):
+        clear = g[g.crowd <= 0.3]
+        verdict[int(t)] = ((clear if len(clear) else g)[cols].mean().to_numpy(), len(g))
+    return verdict
+
+
+def reguess(data: dict, frags: dict, pred: pd.DataFrame, classes: list[str], weights: str = "",
+            version: str | None = None, min_p: float = 0.15, several_p: float = 0.5) -> dict:
+    """Let a (newer) recogniser re-guess the pieces you haven't confirmed; edits `data` in place.
+
+    Untouched: every piece you answered (confirmed, moved, box flags, set aside) and every piece in a
+    set-aside list; pieces with no 1/s crop stay where they are. The re-guessed pieces go, most
+    certain first, to the likeliest named hen not already seen elsewhere at that time - your
+    confirmed pieces count as already placed. Several-hens guesses are set aside like a fresh naming.
+    Nothing becomes confirmed.
+    """
+    from .identity import confirmed, excluded
+
+    fixed = confirmed(data) | excluded(data)
+    hens = [c for c in classes if c != SEVERAL]
+    cid = {c["name"]: c["id"] for c in data["chickens"] if c["name"] in hens}
+    verdict = {t: v for t, v in piece_verdicts(pred, classes).items()
+               if t in frags and t not in fixed and any(t in c["tracks"] for c in data["chickens"])}
+    before = {t: c["id"] for c in data["chickens"] for t in c["tracks"]}
+    placed = [[frags[t] for t in next((c["tracks"] for c in data["chickens"] if c["name"] == h), [])
+               if t in frags and t not in verdict] for h in hens]
+    tracks, several, report = assign_pieces(verdict, frags, classes, min_p, several_p, placed=placed)
+    for c in data["chickens"]:
+        c["tracks"] = [t for t in c["tracks"] if t not in verdict]
+    moved = 0
+    for i, h in enumerate(hens):
+        if h not in cid:  # a hen with no row on this page (renamed?): leave her guesses where they were
+            for t in tracks[i]:
+                next(c for c in data["chickens"] if c["id"] == before[t])["tracks"].append(t)
+            continue
+        c = next(c for c in data["chickens"] if c["id"] == cid[h])
+        c["tracks"].extend(tracks[i])
+        moved += sum(before.get(t) != cid[h] for t in tracks[i])
+    data.setdefault("multiple", [])
+    data["multiple"] = sorted(set(data["multiple"]) | set(several))
+    moved += len(several)
+    for c in data["chickens"]:
+        c["tracks"] = sorted(set(c["tracks"]))
+    data["auto_named"] = {"weights": str(weights), "version": version, **report, "reguessed": len(verdict),
+                          "changed": moved}
+    return {"reguessed": len(verdict), "changed": moved, **report}

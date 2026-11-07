@@ -45,9 +45,16 @@ def size_model(named: pd.DataFrame) -> np.ndarray:
     return np.polyfit(y, np.log(area.to_numpy()), deg)
 
 
-def size_ratio(rows: pd.DataFrame, model: np.ndarray) -> np.ndarray:
+def size_ratio(rows: pd.DataFrame, model: np.ndarray, sizes=None, hen: str | None = None) -> np.ndarray:
+    """Box area / usual area for one bird there. With `sizes` = (size calibration, image_to_ground)
+    the usual area comes from distance + this hen's own size (sizes.py); else from the clip's fit."""
     area = ((rows.x2 - rows.x1) * (rows.y2 - rows.y1)).to_numpy()
-    expected = np.exp(np.polyval(model, rows.y2.to_numpy()))
+    if sizes is not None:
+        from .sizes import expected_area
+        cal, H = sizes
+        expected = expected_area(cal, H, ((rows.x1 + rows.x2) / 2).to_numpy(), rows.y2.to_numpy(), hen)
+    else:
+        expected = np.exp(np.polyval(model, rows.y2.to_numpy()))
     r = pd.Series(area / expected).rolling(SMOOTH, center=True, min_periods=1).median()
     return r.to_numpy()
 
@@ -96,8 +103,9 @@ def _rec_stretches(wrong: np.ndarray) -> list[tuple[int, int]]:
 
 
 def run_checks(data: dict, det: pd.DataFrame, named: pd.DataFrame, picks: pd.DataFrame,
-               feats: np.ndarray, frags: dict, fps: float, recog=None) -> list[dict]:
-    """`recog`: optional (predictions, classes) from ``recognizer.load_predictions``."""
+               feats: np.ndarray, frags: dict, fps: float, recog=None, sizes=None) -> list[dict]:
+    """`recog`: optional (predictions, classes) from ``recognizer.load_predictions``.
+    `sizes`: optional (size calibration, image_to_ground) - box size judged per hen and by distance."""
     from .identity import _centroid, confirmed  # local: avoid import cycle
     from .recognizer import SEVERAL
 
@@ -142,6 +150,17 @@ def run_checks(data: dict, det: pd.DataFrame, named: pd.DataFrame, picks: pd.Dat
         return (P[sel].mean(0), int(sel.sum())) if sel.any() else (None, 0)
 
     flagged = set(data.get("partial", [])) | set(data.get("loose", []))
+    seen_named = det.assign(o=det.track_id.map(owner)).dropna(subset=["o"])
+    n_named = len({c["id"] for c in data["chickens"] if c.get("name")})
+
+    def all_others_seen(t, f0, f1) -> float:
+        """Share of frames in [f0, f1] where every other named hen has her own box."""
+        w = seen_named[(seen_named.frame >= f0) & (seen_named.frame <= f1)]
+        frs = w.loc[w.track_id == t, "frame"].unique()
+        per = w[w.track_id != t].groupby("frame").o.nunique().reindex(frs).fillna(0)
+        return float((per >= n_named - 1).mean()) if len(per) and n_named > 1 else 0.0
+
+    answered_aside = {a["track"] for a in data.get("answers", []) if a["verdict"] in ("multiple", "not_chicken", "unsure")}
     clock = lambda f: f"{int(f / fps // 60)}:{int(f / fps % 60):02d}"
     out = []
     aside = {t: "several chickens" for t in data.get("multiple", [])} | \
@@ -153,9 +172,14 @@ def run_checks(data: dict, det: pd.DataFrame, named: pd.DataFrame, picks: pd.Dat
         if len(g) < SMOOTH:
             continue
         frames = g.frame.to_numpy()
-        ratio = size_ratio(g, model)
+        hen = names.get(owner[t]) if t in owner else None
+        known = sizes is not None and hen in sizes[0]["hens"]
+        ratio = size_ratio(g, model, sizes, hen if known else None)
+        usual = f"{hen}'s usual size there" if known else "one bird"
 
-        if t in aside:   # 1. set aside, but single-bird sized for a long stretch
+        if t in aside and t in answered_aside:  # you set it aside yourself: your answer, not the box size
+            pass
+        elif t in aside:   # 1. set aside, but single-bird sized for a long stretch
             for f0, f1 in _runs(ratio <= SINGLE_MAX, frames, fps, min_s=5.0):
                 cid, sim = _best_chicken(seg_feats(t, f0, f1), centroids, names)
                 p, n = rec_verdict(t, f0, f1, clear_only=False)
@@ -187,17 +211,25 @@ def run_checks(data: dict, det: pd.DataFrame, named: pd.DataFrame, picks: pd.Dat
                                 "title": f"Piece #{t} is set aside as \"several chickens\", but the recogniser "
                                          f"sees just {hen} ({p[i]:.0%} sure, from {n} crops).",
                                 "fix": f"Give it to {hen}"})
-        elif t in owner:  # 2. merged box inside a named piece
+        if t in owner and t not in flagged:  # 2. merged box inside a named piece (not when you've
+            #    already said her box is off: "box too big" / "only part of her")
             for f0, f1 in _runs(ratio >= MERGED_MIN, frames, fps, min_s=3.0):
                 key = f"merged_inside:{t}:{f0}:{f1}"
                 if key in dismissed:
                     continue
+                if all_others_seen(t, f0, f1) >= 0.9:
+                    continue  # every other hen has her own box elsewhere then: it can't be two hens
+                # A big box is far more often one hen boxed loosely (wings out, side-on, half behind
+                # something) than two hens: the suggested fix keeps her name; "several" is the second
+                # choice, not the default.
+                who = names[owner[t]]
                 out.append({"key": key, "kind": "merged_inside", "track": t, "from_frame": f0, "to_frame": f1,
                             "seconds": round((f1 - f0 + 1) / fps, 1), "chicken": owner[t],
-                            "title": f"{names[owner[t]]}'s piece #{t}: {clock(f0)}–{clock(f1)} the box is about "
-                                     f"{np.median(ratio[(frames >= f0) & (frames <= f1)]):.1f}× one bird — "
-                                     f"probably two chickens in one box.",
-                            "fix": f"Cut {clock(f0)}–{clock(f1)} out as \"several chickens\""})
+                            "title": f"{who}'s piece #{t}: {clock(f0)}–{clock(f1)} the box is about "
+                                     f"{np.median(ratio[(frames >= f0) & (frames <= f1)]):.1f}× {usual} — "
+                                     f"one hen in a big box, or two hens?",
+                            "fix": f"Mark {clock(f0)}–{clock(f1)} as ◑ box too big (still {who})",
+                            "alt": {"variant": "several", "fix": f"Two hens: cut {clock(f0)}–{clock(f1)} out as \"several chickens\""}})
             if t in flagged:
                 continue  # only part of a bird / loose box: appearance checks would be noise
             if t in rec:
@@ -277,8 +309,9 @@ def run_checks(data: dict, det: pd.DataFrame, named: pd.DataFrame, picks: pd.Dat
     return sorted(out, key=lambda c: -c["seconds"])
 
 
-def apply_check(check: dict, data: dict, det: pd.DataFrame, run_dir, split_piece) -> tuple[pd.DataFrame, list[int]]:
-    """Carry out a check's suggested fix.
+def apply_check(check: dict, data: dict, det: pd.DataFrame, run_dir, split_piece,
+                variant: str | None = None) -> tuple[pd.DataFrame, list[int]]:
+    """Carry out a check's suggested fix (or its second choice, `variant`, e.g. "several").
 
     Returns (updated detections, pieces that still need a chicken - the caller places them
     once their fresh appearance features exist).
@@ -319,5 +352,33 @@ def apply_check(check: dict, data: dict, det: pd.DataFrame, run_dir, split_piece
             if piece in data.get(key, []):
                 data[key].remove(piece)
         return det, [piece]
-    apply_answer(data, piece, None, "multiple")  # merged_inside
+    if variant == "several":  # merged_inside, second choice: two hens in one box
+        apply_answer(data, piece, None, "multiple")
+    else:  # merged_inside, suggested: still her, box too big
+        apply_answer(data, piece, check["chicken"], "loose")
     return det, []
+
+
+def confirm_on_dismiss(check: dict, data: dict) -> str:
+    """"Looks fine" is an answer: record it, so the piece counts as checked by you (and is learnt
+    from) instead of staying the computer's guess. Returns what was recorded, for the undo label.
+
+    named piece (recogniser / stretch / swap / big box): confirmed as the hen it's named, keeping any
+        box flag you gave it; a big box dismissed this way is also left out of the size averages
+        (sizes.py reads the dismissed check), since it's an unusual pose, not her usual size
+    set-aside piece: confirmed in the pile it's in ("several" / "not a chicken")
+    """
+    from .identity import BOX_FLAGS, EXCLUDED_KEYS, apply_answer, box_flag
+
+    t = int(check["track"])
+    owner = next((c for c in data["chickens"] if t in c["tracks"]), None)
+    if owner is not None:
+        flag = box_flag(data, t)
+        apply_answer(data, t, owner["id"], flag if flag in BOX_FLAGS else "yes")
+        return f"piece #{t} is {owner['name'] or 'Chicken ' + str(owner['id'] + 1)}"
+    pile = next((v for v, key in EXCLUDED_KEYS.items() if t in data.get(key, [])), None)
+    if pile is not None:
+        apply_answer(data, t, None, pile)
+        words = {"multiple": "several chickens", "not_chicken": "not a chicken", "unsure": "can't tell which hen"}
+        return f"piece #{t} stays {words.get(pile, pile)}"
+    return ""

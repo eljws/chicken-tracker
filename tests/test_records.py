@@ -62,3 +62,15 @@ def test_backup_copies_once_then_links(tmp_path):
     b2 = Path(two["path"])
     assert two["linked"] >= 2 and (b2 / "dataset/labels.json").read_text() == '{"x": 1}'
     assert os.stat(b1 / "dataset/images/a.jpg").st_ino == os.stat(b2 / "dataset/images/a.jpg").st_ino
+
+
+def test_models_get_plain_numbers_per_kind(tmp_path):
+    R.register("detector", _w(tmp_path / "a.pt", b"a"), version="first")
+    R.register("recognizer", _w(tmp_path / "r.pt", b"r"), version="hens")
+    R.register("detector", _w(tmp_path / "b.pt", b"b"), version="second")
+    num = {(m["kind"], m["version"]): m["number"] for m in R.models()}
+    assert num == {("detector", "first"): 1, ("detector", "second"): 2, ("recognizer", "hens"): 1}
+    R.use("detector", "v2")
+    assert R.resolve("detector", "2") == "second" and R.current("detector").stem == "second"
+    with pytest.raises(ValueError):
+        R.use("detector", "v9")

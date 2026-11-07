@@ -24,6 +24,9 @@ STEPS = {  # pipeline order, with names shown on the dashboard
     "skeletons": "Skeletons",
     "pecks": "Pecks",
 }
+# Steps with no model of their own carry a method number: raise it when a change to the code
+# should make older results count as out of date (the home page then marks them yellow).
+METHOD_VERSIONS = {"pieces": 1, "pecks": 1}
 _lock = threading.Lock()
 
 
@@ -61,8 +64,9 @@ class Progress:
         self.phase = ""
 
     def _rec(self, state: str, **extra) -> dict:
+        v = {"version": METHOD_VERSIONS[self.step]} if self.step in METHOD_VERSIONS else {}
         return {"label": self.label, "state": state, "done": self.done_n, "total": self.total,
-                "phase": self.phase, "started": self.started, "updated": time.time(), **extra}
+                "phase": self.phase, "started": self.started, "updated": time.time(), **v, **extra}
 
     def preview_due(self, every_s: float = 4.0) -> bool:
         """True about every ``every_s`` seconds: time to draw a fresh picture (drawing costs time)."""

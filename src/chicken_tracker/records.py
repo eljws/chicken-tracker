@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import os
 import shutil
 import sqlite3
@@ -62,7 +63,34 @@ def connect(root: Path = ROOT) -> sqlite3.Connection:
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")  # pages can read while a training round writes
     db.executescript(SCHEMA)
+    _number_models(db)
     return db
+
+
+def _number_models(db: sqlite3.Connection) -> None:
+    """Each model gets a plain number within its kind (detector v1, v2, v3 ...), in the order it was
+    made. Given once and kept: a number is never reused or shifted, even if a model is removed."""
+    cols = {r[1] for r in db.execute("PRAGMA table_info(models)")}
+    if "number" not in cols:
+        db.execute("ALTER TABLE models ADD COLUMN number INTEGER")
+    todo = db.execute("SELECT rowid, kind FROM models WHERE number IS NULL ORDER BY created, rowid").fetchall()
+    for r in todo:
+        n = db.execute("SELECT COALESCE(MAX(number), 0) + 1 FROM models WHERE kind=?", (r["kind"],)).fetchone()[0]
+        db.execute("UPDATE models SET number=? WHERE rowid=?", (n, r["rowid"]))
+    if todo:
+        db.commit()
+
+
+def resolve(kind: str, version: str, root: Path = ROOT) -> str:
+    """'v3' or '3' -> that model's version name; a name is returned as it is."""
+    m = re.fullmatch(r"v?(\d+)", version.strip())
+    if not m:
+        return version
+    with connect(root) as db:
+        row = db.execute("SELECT version FROM models WHERE kind=? AND number=?", (kind, int(m[1]))).fetchone()
+    if row is None:
+        raise ValueError(f"no {kind} model v{m[1]}")
+    return row["version"]
 
 
 def sha256(path: Path) -> str:
@@ -97,15 +125,19 @@ def register(kind: str, weights: Path, version: str | None = None, parent: str |
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(weights, dst)
         first = db.execute("SELECT COUNT(*) FROM models WHERE kind=?", (kind,)).fetchone()[0] == 0
-        db.execute("INSERT INTO models VALUES (?,?,?,?,?,?,?,?,?,?)",
+        number = db.execute("SELECT COALESCE(MAX(number), 0) + 1 FROM models WHERE kind=?", (kind,)).fetchone()[0]
+        db.execute("INSERT INTO models (kind, version, path, sha256, parent, created, status, trained_on, metrics,"
+                   " note, number) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                    (kind, version, str(dst), digest, parent, time.time(),
                     "current" if first and make_current_if_first else "candidate",
-                    json.dumps(trained_on or {}), json.dumps(metrics or {}), note))
+                    json.dumps(trained_on or {}), json.dumps(metrics or {}), note, number))
     return version
 
 
 def use(kind: str, version: str, root: Path = ROOT) -> None:
-    """Make `version` the current model of its kind (the old current one is kept, as 'previous')."""
+    """Make `version` (a name, or its number like 'v3') the current model of its kind (the old
+    current one is kept, as 'previous')."""
+    version = resolve(kind, version, root)
     with connect(root) as db:
         if not db.execute("SELECT 1 FROM models WHERE kind=? AND version=?", (kind, version)).fetchone():
             raise ValueError(f"no {kind} model {version!r}")
