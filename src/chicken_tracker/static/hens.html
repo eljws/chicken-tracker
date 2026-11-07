@@ -42,6 +42,13 @@
   .key { display: inline-flex; gap: 10px; flex-wrap: wrap; }
   .key span { display: inline-flex; gap: 4px; align-items: center; }
   .sw { width: 14px; height: 14px; border-radius: 3px; border: 2px solid; display: inline-block; }
+  button.c.br { border-left: 6px solid var(--hc, #888); } button.c.br.on { outline: 2px solid #ffc107; background: #4a4a4a; }
+  body.painting .pic { cursor: crosshair; }
+  .pic.painted { outline: 3px solid var(--pc, #fff); outline-offset: -3px; }
+  .pic.painted.bpartial { outline-style: dashed; } .pic.painted.bloose { outline-style: dotted; }
+  .pic .pt { position: absolute; left: 0; right: 0; top: 0; font-size: 10px; line-height: 1.35; text-align: center; color: #fff;
+             background: color-mix(in srgb, var(--pc, #000) 85%, transparent); white-space: nowrap; overflow: hidden; pointer-events: none; }
+  .pic .bot { position: absolute; right: 2px; top: 1px; font-size: 11px; pointer-events: none; }
   .sizes { max-width: 1100px; }
   .sizes h2 { font-size: 16px; font-weight: 600; margin: 18px 0 2px; } .sizes .sub { color: #999; font-size: 13px; margin-bottom: 8px; }
   .chart { background: #1d1d1d; border: 1px solid #2c2c2c; border-radius: 8px; padding: 10px; position: relative; }
@@ -64,6 +71,9 @@
       <span><i class="sw" style="border-color:#555"></i>not confirmed</span>
       <span><i class="sw" style="border-color:#ffb74d;border-style:dashed"></i>only part</span>
       <span><i class="sw" style="border-color:#64b5f6;border-style:dotted"></i>box too big</span></span></div>
+  <div class="row" id="palrow"><span class="lbl">Paint</span><span id="pal" class="row" style="margin:0"></span></div>
+  <div class="row" id="pbar" style="display:none"><button class="c yes" id="papply"></button><span class="muted" id="pplan"></span>
+    <button class="c" id="pclear">clear paint</button></div>
   <div class="row"><span class="lbl">Hens</span><span id="hens" class="row" style="margin:0"></span></div>
   <div class="row"><span class="lbl">Group by</span><span id="groups" class="row" style="margin:0"></span></div>
   <div class="row"><span class="lbl">Show</span><span id="shows" class="row" style="margin:0"></span>
@@ -102,7 +112,8 @@ const GROUPS = {
     const i = ODD_B.findIndex(([x]) => p.odd < x); return [i, ODD_B[i][1], -i]; }],
   rec: ["Recogniser says", p => { const k = p.rec || "?"; return [k, p.rec ? `recogniser: ${p.rec}` : "no recogniser answer", p.rec === p.hen ? "0" : "1" + k]; }],
 };
-const SHOWS = { all: "everything", todo: "only not confirmed", doubt: "only doubtful (not confirmed, and unlike her or recogniser disagrees)" };
+const SHOWS = { all: "everything", todo: "remaining (not confirmed)", doubt: "only doubtful (not confirmed, and unlike her or recogniser disagrees)",
+                claude: "🤖 Claude's answers", ir: "🌙 infrared pieces (out of scope, hidden elsewhere)" };
 
 async function load(keepScroll) {
   const y = scrollY;
@@ -131,8 +142,9 @@ function controls() {
   document.documentElement.style.setProperty("--sz", V.size + "px");
 }
 const doubtful = p => !p.sure && ((p.odd ?? 0) >= 0.2 || p.closer_to || (p.rec && p.hen && p.rec !== p.hen));
-const visible = p => (V.day === "all" || dayOf(p.run) === V.day) &&
-  (V.show === "all" || (V.show === "todo" && !p.sure) || (V.show === "doubt" && doubtful(p)));
+const visible = p => (V.day === "all" || dayOf(p.run) === V.day) && (V.show !== "claude" || p.claude) &&
+  (V.show === "ir" ? p.ir : !p.ir) &&  // infrared (black-and-white) pieces: only in their own view
+  (V.show === "all" || V.show === "claude" || V.show === "ir" || (V.show === "todo" && !p.sure) || (V.show === "doubt" && doubtful(p)));
 const ofHen = h => p => h === ASIDE ? !p.hen : p.hen === h;
 const count = h => D.pieces.filter(p => ofHen(h)(p) && visible(p)).length;
 
@@ -150,8 +162,79 @@ function render() {
   const side = hens.length > 1;
   const main = document.getElementById("main");
   main.innerHTML = `<div class="cols" style="grid-template-columns:repeat(${hens.length}, minmax(0, 1fr))">${hens.map(h => column(h, ps.filter(ofHen(h)), side)).join("")}</div>`;
-  main.querySelectorAll(".pic").forEach(el => el.onclick = () => open(+el.dataset.i));
+  main.querySelectorAll(".pic").forEach(el => {
+    el.onclick = () => { if (!PB.bird && !PB.box) open(+el.dataset.i); };
+    el.onpointerdown = e => { if (!PB.bird && !PB.box) return; e.preventDefault(); pDrag = true; paint(+el.dataset.i, true); };
+    el.onpointerenter = () => { if (pDrag) paint(+el.dataset.i, false); };
+  });
+  palette(); showPaint();
 }
+
+// ---- paint across clips: hold a Bird and/or a Box brush, click or drag pictures, Apply = one undo step per clip
+const PB = { bird: null, box: null, marks: {} };  // marks: piece index -> {bird, box}
+let pDrag = false, pErase = false;
+addEventListener("pointerup", () => { pDrag = false; });
+const PASIDE = [["multiple", "several"], ["not_chicken", "not a chicken"], ["unsure", "can't tell"]];
+const PBOX = [["yes", "✓ right as is"], ["partial", "◐ only part of her"], ["loose", "◑ box too big"]];
+function palette() {
+  const el = document.getElementById("pal");
+  el.innerHTML = D.hens.map((h, i) => `<button class="c br ${PB.bird === h ? "on" : ""}" data-pb="${esc(h)}" style="--hc:${colour(h)}">${esc(h)} <span class="muted">${i + 1}</span></button>`).join("") +
+    PASIDE.map(([k, n]) => `<button class="c br ${PB.bird === k ? "on" : ""}" data-pb="${k}" style="--hc:#666">${n}</button>`).join("") +
+    `<span class="lbl" style="min-width:0;margin-left:10px">Box</span>` +
+    PBOX.map(([k, n]) => `<button class="c br ${PB.box === k ? "on" : ""}" data-px="${k}" style="--hc:#bbb">${n}</button>`).join("") +
+    `<span class="muted" style="margin-left:8px">${PB.bird || PB.box ? "click or drag across pictures (any clip) · again to unpaint · Esc brushes down" : "pick a brush to paint; without one, click a picture for its menu"}</span>`;
+  el.querySelectorAll("[data-pb]").forEach(b => b.onclick = () => { PB.bird = PB.bird === b.dataset.pb ? null : b.dataset.pb; palette(); });
+  el.querySelectorAll("[data-px]").forEach(b => b.onclick = () => { PB.box = PB.box === b.dataset.px ? null : b.dataset.px; palette(); });
+  document.body.classList.toggle("painting", !!(PB.bird || PB.box));
+}
+function paint(i, start) {
+  const m = PB.marks[i] || {};
+  if (start) pErase = (!PB.bird || m.bird === PB.bird) && (!PB.box || m.box === PB.box) && !!(m.bird || m.box);
+  if (pErase) { if (PB.bird) delete m.bird; if (PB.box) delete m.box; } else { if (PB.bird) m.bird = PB.bird; if (PB.box) m.box = PB.box; }
+  if (m.bird || m.box) PB.marks[i] = m; else delete PB.marks[i];
+  showPaint();
+}
+function answerFor(i) {  // what Apply records for picture i on its own clip's naming page, or {skip: why}
+  const p = D.pieces[i], m = PB.marks[i], ids = D.ids[p.run] || {};
+  if (m.bird && !D.hens.includes(m.bird)) return { track: p.track, chicken: null, verdict: m.bird };
+  const hen = m.bird || p.hen;
+  if (!hen) return { skip: "a box mark needs a hen" };
+  if (ids[hen] === undefined) return { skip: `${hen} has no row in that clip` };
+  const verdict = m.box === "partial" || m.box === "loose" ? m.box : hen === p.hen ? "yes" : "moved";
+  return { track: p.track, chicken: ids[hen], verdict };
+}
+const markLabel = m => (m.bird ? (PASIDE.find(([k]) => k === m.bird) || [0, m.bird])[1] : "") + (m.box === "partial" ? " ◐" : m.box === "loose" ? " ◑" : m.box === "yes" ? " ✓" : "");
+function showPaint() {
+  document.querySelectorAll(".pic").forEach(el => { const m = PB.marks[+el.dataset.i];
+    el.classList.toggle("painted", !!m); el.classList.toggle("bpartial", m?.box === "partial"); el.classList.toggle("bloose", m?.box === "loose");
+    el.style.setProperty("--pc", m ? (m.bird && D.hens.includes(m.bird) ? colour(m.bird) : m.bird ? "#666" : "#bbb") : "transparent");
+    el.querySelector(".pt").textContent = m ? markLabel(m) : ""; });
+  const idx = Object.keys(PB.marks).map(Number), runs = new Set(idx.map(i => D.pieces[i].run));
+  const skip = idx.map(answerFor).filter(a => a.skip).length;
+  document.getElementById("pbar").style.display = idx.length ? "flex" : "none";
+  document.getElementById("papply").textContent = `✓ Apply ${idx.length} picture${idx.length === 1 ? "" : "s"} in ${runs.size} clip${runs.size === 1 ? "" : "s"}`;
+  document.getElementById("pplan").textContent = skip ? `${skip} can't be applied (e.g. that hen has no row in its clip) and will be left as they are` : "one undo step per clip, on that clip's naming page";
+}
+document.getElementById("pclear").onclick = () => { PB.marks = {}; showPaint(); };
+document.getElementById("papply").onclick = async () => {
+  const by = {};
+  for (const i of Object.keys(PB.marks).map(Number)) { const a = answerFor(i); if (a.skip) continue;
+    (by[D.pieces[i].run] = by[D.pieces[i].run] || []).push(a); }
+  let ok = 0, bad = [];
+  for (const [run, answers] of Object.entries(by)) {
+    const r = await fetch(`../run/${run}/naming/api/answers`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ answers }) });
+    const j = await r.json().catch(() => ({ error: `error ${r.status}` }));
+    if (j.error) bad.push(`${run}: ${j.error}`); else ok += answers.length;
+  }
+  PB.marks = {}; toast(bad.length ? `${ok} applied · problems: ${bad.join("; ")}` : `${ok} answers applied ✓ — undo per clip on its naming page`, bad.length ? 6000 : 2500);
+  load(true);
+};
+addEventListener("keydown", e => {
+  if (V.view === "sizes" || e.target.tagName === "INPUT") return;
+  if (e.key === "Escape") { PB.bird = PB.box = null; palette(); }
+  const i = "123456789".indexOf(e.key); if (i >= 0 && D && D.hens[i]) { PB.bird = PB.bird === D.hens[i] ? null : D.hens[i]; palette(); }
+  if (e.key === "Enter" && Object.keys(PB.marks).length) document.getElementById("papply").click();
+});
 function column(h, ps, side) {
   const fn = GROUPS[V.group][1], g = new Map();
   for (const p of ps) { const [k, title, order] = h === ASIDE && V.group === "sure" ? [p.aside, p.aside, p.aside] : fn(p);
@@ -173,7 +256,7 @@ function pic(p) {
     (p.sure ? " · confirmed" : "") + (p.rec ? ` · recogniser: ${p.rec} (${Math.round(p.rec_p * 100)}%)` : "") +
     (p.odd !== undefined ? ` · unlike her: ${p.odd.toFixed(2)}` : "") + (p.closer_to ? ` · looks closer to ${p.closer_to}` : "");
   return `<div class="pic ${p.sure ? "sure" : ""} ${p.flag || ""} ${cur === i ? "sel" : ""}" data-i="${i}" title="${esc(tip)}">
-    <img loading="lazy" src="crop/${p.run}/${encodeURIComponent(p.crop)}">${badge ? `<span class="b" style="--bc:${badge[1]}">${esc(badge[0])}</span>` : ""}</div>`;
+    <img loading="lazy" src="crop/${p.run}/${encodeURIComponent(p.crop)}" draggable="false">${badge ? `<span class="b" style="--bc:${badge[1]}">${esc(badge[0])}</span>` : ""}${p.claude ? '<span class="bot" title="answered by Claude">🤖</span>' : ""}${p.ir ? '<span class="bot" style="left:2px;right:auto" title="infrared (black-and-white): out of scope">🌙</span>' : ""}<span class="pt"></span></div>`;
 }
 
 function open(i) {
@@ -199,7 +282,8 @@ function open(i) {
       <button class="c no" data-v="multiple">several</button></div>
     <div class="muted" style="margin-top:8px">
       <a href="../run/${p.run}/naming/#name" target="_blank">open this clip's naming page</a> ·
-      <a href="../run/${p.run}/player/#t=${p.t}" target="_blank">play it in the player at ${hms(p.clock_s)}</a></div>`;
+      <a href="../run/${p.run}/player/#t=${p.pic_t ?? p.t}&piece=${p.track}&a=${p.t}&b=${(p.t + p.duration_s).toFixed(1)}${p.hen ? `&name=${encodeURIComponent(p.hen)}` : ""}"
+         target="_blank" title="The piece gets a white box; a banner says when it starts and ends">🎬 open the footage at this picture (${hms(p.clock_s + ((p.pic_t ?? p.t) - p.t))})</a></div>`;
   pop.querySelector("#pclose").onclick = close;
   pop.querySelectorAll("button[data-v]").forEach(b => b.onclick = async () => {
     const body = { track: p.track, chicken: b.dataset.c !== undefined ? +b.dataset.c : null, verdict: b.dataset.v };

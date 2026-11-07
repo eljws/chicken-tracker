@@ -38,7 +38,10 @@ def make_handler(run_dir: Path):
         return I.piece_frame(store.data["video"], st["det"], track, frame, store.data["fps"], wide=wide)
 
     @functools.lru_cache(maxsize=16)
-    def clip_mp4(track: int, version: int, direction: int = 0) -> bytes | None:
+    def clip_mp4(track: int, version: int, direction: int = 0, span: tuple[int, int] | None = None) -> bytes | None:
+        if span:  # a checks stretch: from a moment before to a moment after
+            pad = int(2 * store.data["fps"])
+            return I.piece_clip(store.data["video"], st["det"], track, store.data["fps"], span=(span[0] - pad, span[1] + pad))
         if not direction:
             return I.piece_clip(store.data["video"], st["det"], track, store.data["fps"])
         tr = trace_view(track, version)["back" if direction < 0 else "forward"]
@@ -264,8 +267,10 @@ def make_handler(run_dir: Path):
         from . import sizes as SZ
         from .calibration import load_calibration
         cal, H = SZ.load(run_dir), load_calibration(run_dir)
-        return K.run_checks(store.data, st["det"], I.pd.read_csv(named_p), picks, feats, st["frags"],
-                            store.data["fps"], recog=recog(), sizes=(cal, H) if cal and H is not None else None)
+        ck = K.run_checks(store.data, st["det"], I.pd.read_csv(named_p), picks, feats, st["frags"],
+                          store.data["fps"], recog=recog(), sizes=(cal, H) if cal and H is not None else None)
+        irt = ir_tracks()  # infrared: out of scope
+        return [c for c in ck if c["track"] not in irt and not in_ir(c["from_frame"], c["to_frame"])]
 
     def recog():
         """Recogniser predictions joined to the current pieces; re-joined after cuts."""
@@ -292,6 +297,33 @@ def make_handler(run_dir: Path):
         return {"track": t, "start": f["start"], "duration_s": round(f["end"] - f["start"], 1),
                 "sure": t in I.confirmed(store.data), "strip": I.strip_frames(st["det"], t, STRIP_LEN)}
 
+    # infrared (black-and-white) stretches are out of scope: measured once in the background, then the
+    # pieces mostly inside them get no checks, questions or "?" marks (their names stay as they are)
+    ir_state: dict = {"ir": None}
+
+    def _measure_ir():
+        from . import daylight as DL
+        try:
+            ir_state["ir"] = DL.infrared_s(run_dir)
+        except Exception:  # never block naming on this
+            ir_state["ir"] = []
+    threading.Thread(target=_measure_ir, daemon=True).start()
+
+    def ir_tracks() -> set[int]:
+        from . import daylight as DL
+        ir = ir_state["ir"] or []
+        key = (st["version"], len(store.data["fragments"]), tuple(map(tuple, ir)))
+        if ir_state.get("k") != key:
+            ir_state["k"], ir_state["tracks"] = key, DL.infrared_tracks(store.data, ir)
+        return ir_state["tracks"]
+
+    def in_ir(f0: int, f1: int) -> bool:
+        a, b = f0 / store.data["fps"], f1 / store.data["fps"]
+        ir = ir_state["ir"] or []
+        if b <= a:
+            return any(x <= a <= y for x, y in ir)
+        return sum(max(0.0, min(b, y) - max(a, x)) for x, y in ir) > 0.5 * (b - a)
+
     CHECK_SHORT_S, CHECK_P, CHECK_SEVERAL_P = 2.0, 0.8, 0.2
     check_cache: dict = {}
 
@@ -299,7 +331,8 @@ def make_handler(run_dir: Path):
         """{piece: why} for the computer's guesses worth a look: seen under 2 s, the recogniser under
         80% sure or naming another hen, or giving "several hens" 20%+. Marks only, never a choice."""
         rec = recog()
-        key = (st["version"], st.get("recog_key"))
+        key = (st["version"], st.get("recog_key"), ir_state.get("k"))
+        ir_tracks()
         if check_cache.get("k") == key:
             return check_cache["v"]
         d, fr = store.data, store.data["fragments"]
@@ -313,8 +346,9 @@ def make_handler(run_dir: Path):
             means = {int(t): g.mean() for t, g in clear.groupby("track_id")[cols]}
             means |= {int(t): g.mean() for t, g in pred.groupby("track_id")[cols] if int(t) not in means}
         out = {}
+        irt = ir_tracks()
         for t, name in owner.items():
-            if t in done:
+            if t in done or t in irt:
                 continue
             why = []
             dur = fr[str(t)]["end"] - fr[str(t)]["start"]
@@ -363,6 +397,7 @@ def make_handler(run_dir: Path):
         d = store.data
         fr = d["fragments"]
         chk = to_check()
+        by_claude = I.answered_by_claude(d)
         chickens = []
         for c in d["chickens"]:
             tr = sorted(c["tracks"], key=lambda t: -fr[str(t)]["n"])
@@ -370,26 +405,29 @@ def make_handler(run_dir: Path):
                 "id": c["id"], "name": c["name"],
                 "minutes": round(sum(fr[str(t)]["end"] - fr[str(t)]["start"] for t in tr) / 60, 1),
                 "fragments": [{"track": t, "crop": mid_crop(t), "sure": t in I.confirmed(d),
-                               "flag": I.box_flag(d, t), **({"check": chk[t]} if t in chk else {})} for t in tr],
+                               "flag": I.box_flag(d, t), **({"check": chk[t]} if t in chk else {}),
+                               **({"claude": True} if t in by_claude else {})} for t in tr],
             })
-        qs = I.questions(d, extra=chk)
-        aside = {reason: [{"track": t, "crop": mid_crop(t)} for t in d.get(key, [])]
+        irt = ir_tracks()
+        qs = [q for q in I.questions(d, extra=chk) if q["track"] not in irt]
+        aside = {reason: [{"track": t, "crop": mid_crop(t), **({"claude": True} if t in by_claude else {})} for t in d.get(key, [])]
                  for reason, key in I.EXCLUDED_KEYS.items()}
         # pieces in no hen's row and no pile (automatic naming found every hen elsewhere at that time):
         # shown in their own row so they can be answered, and counted as questions
         placed = {t for c in d["chickens"] for t in c["tracks"]} | I.excluded(d)
         unplaced = [{"track": int(t), "crop": mid_crop(int(t))} for t in sorted(fr, key=lambda t: fr[t]["start"])
-                    if int(t) not in placed]
-        cf = I.conflicts(d, seen=seen())
+                    if int(t) not in placed and int(t) not in irt]
+        cf = [c for c in I.conflicts(d, seen=seen()) if not (c["a"] in irt and c["b"] in irt)]
         ck = current_checks()
         write_status({"conflicts": len(cf), "questions": len(qs) + len(unplaced), "checks": len(ck), "to_check": len(chk)})
         return {"chickens": chickens, "aside": aside, "unplaced": unplaced, "fps": d["fps"], "version": st["version"],
                 "checks": len(ck), "check": _check_view(ck[0]) if ck else None,
-                "check_list": [{k: c[k] for k in ("key", "kind", "title", "seconds")} for c in ck[:40]],
+                "check_list": [{k: c[k] for k in ("key", "kind", "title", "seconds", "from_frame", "to_frame", "track")} for c in ck[:40]],
                 "undo": store.history(),
                 "conflicts": len(cf), "conflict": _conflict(cf[0]) if cf else None,
                 "questions": len(qs), "next": _question(qs[0]) if qs else None, "to_check": len(chk),
-                "answered": len(d["answers"])}
+                "answered": len(d["answers"]),
+                "infrared": ir_state["ir"] or [], "infrared_pieces": len(irt)}
 
     def _question(q: dict) -> dict:
         c = next(c for c in store.data["chickens"] if c["id"] == q["chicken"])
@@ -572,6 +610,10 @@ def make_handler(run_dir: Path):
             path = self.path.split("?")[0]
             if path in ("/", "/index.html"):
                 return self._send(page, "text/html; charset=utf-8")
+            if path == "/api/questions":  # every open question (not just the next), e.g. to answer in bulk
+                d = store.data
+                irt = ir_tracks()
+                return self._json([_question(q) for q in I.questions(d, extra=to_check()) if q["track"] not in irt])
             if path == "/api/state":
                 return self._json(state())
             m = re.fullmatch(r"/api/check/(.+)", path)
@@ -603,7 +645,8 @@ def make_handler(run_dir: Path):
                 return self._send(mp4, "video/mp4")
             m = re.fullmatch(r"/clip/(\d+)\.mp4", path)
             direction = -1 if "dir=back" in self.path else 1 if "dir=forward" in self.path else 0
-            if m and (mp4 := clip_mp4(int(m[1]), v, direction)):
+            sp = re.search(r"[?&]from=(\d+)&to=(\d+)", self.path)
+            if m and (mp4 := clip_mp4(int(m[1]), v, direction, (int(sp[1]), int(sp[2])) if sp else None)):
                 return self._send(mp4, "video/mp4")
             if path.startswith("/crop/"):
                 p = crops / Path(unquote(path[6:])).name  # strip any directories
@@ -613,6 +656,20 @@ def make_handler(run_dir: Path):
 
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or "{}")
+            if body.get("by") == "claude":  # answers Claude gave from the pictures: tagged, to spot-check
+                # by identity, not position: a cut drops the piece's older answers before adding new ones
+                before = {id(a) for a in store.data["answers"]}
+                ok = self._post(body) is not False  # False = refused (error already sent)
+                if ok:
+                    with lock:
+                        for a in store.data["answers"]:
+                            if id(a) not in before:
+                                a["by"] = "claude"
+                        store.save()
+                return
+            self._post(body)
+
+        def _post(self, body) -> bool:
             try:
                 if self.path == "/api/name":
                     label = f"named {name_of(body['chicken'])} \"{str(body['name']).strip()}\""
@@ -657,17 +714,30 @@ def make_handler(run_dir: Path):
                     return self._json(do_apply_check(str(body["key"]), body.get("variant")))
                 if self.path == "/api/dismiss_check":  # "looks fine": your answer for that piece, one undo step
                     k = str(body["key"])
-                    check = next((c for c in current_checks() if c["key"] == k), None)
+                    cks = current_checks()
+                    check = next((c for c in cks if c["key"] == k), None)
+                    # another open check on the same piece: don't confirm it yet (that one may still change it)
+                    others = check is not None and any(c["track"] == check["track"] and c["key"] != k for c in cks)
                     said = []
 
                     def fn(d):
                         d.setdefault("dismissed_checks", []).append(k)
-                        if check is not None:
+                        if check is not None and not others:
                             said.append(K.confirm_on_dismiss(check, d))
                     label = "looks fine"
                     if check is not None:
                         label += f": {check['title'][:60]}"
                     return self._json(mutate(fn, label))
+                if self.path == "/api/tag_claude":  # repair: mark given answers as Claude's (latest match each)
+                    with lock:
+                        n = 0
+                        for want in body["answers"]:
+                            for a in reversed(store.data["answers"]):
+                                if a["track"] == int(want["track"]) and a["verdict"] == want["verdict"] and not a.get("by"):
+                                    a["by"] = "claude"; n += 1
+                                    break
+                        store.save()
+                    return self._json({"tagged": n})
                 if self.path == "/api/undo":
                     return self._json(do_undo())
                 if self.path == "/api/mark":
@@ -678,7 +748,8 @@ def make_handler(run_dir: Path):
                 if self.path == "/api/split":
                     return self._json(do_split(int(body["track"]), int(body["frame"])))
             except (KeyError, ValueError, StopIteration) as e:
-                return self._json({"error": f"{e}"}, 400)
+                self._json({"error": f"{e}"}, 400)
+                return False
             finally:
                 if self.path != "/api/dots":
                     schedule_dots()  # any change: refresh every hen's dot 1.5 s after the last one

@@ -420,6 +420,19 @@ def confirmed(data: dict) -> set[int]:
     return {a["track"] for a in data["answers"] if a["verdict"] in ("yes", "moved", *BOX_FLAGS, *EXCLUDED)}
 
 
+def answered_by_claude(data: dict) -> set[int]:
+    """Pieces whose latest answer came from Claude looking at the pictures (asked for by you), not
+    from you: shown with a 🤖 mark to spot-check, and kept out of training and size learning."""
+    last = {}
+    for a in data["answers"]:
+        last[a["track"]] = a.get("by")
+    return {t for t, by in last.items() if by == "claude"}
+
+
+def confirmed_by_you(data: dict) -> set[int]:
+    return confirmed(data) - answered_by_claude(data)
+
+
 def box_flag(data: dict, track: int) -> str | None:
     return next((f for f in BOX_FLAGS if track in data.get(f, [])), None)
 

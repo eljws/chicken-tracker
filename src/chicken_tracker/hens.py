@@ -26,7 +26,7 @@ ASIDE = {"multiple": "several", "rejected": "not a chicken", "unsure": "can't te
 
 
 def _stamp(run: Path) -> tuple:
-    files = ("identity/identity.json", "identity/features.npy", "identity/crops.csv", "identity/recognizer.csv")
+    files = ("identity/identity.json", "identity/features.npy", "identity/crops.csv", "identity/recognizer.csv", "daylight.json")
     return tuple(round((run / f).stat().st_mtime, 3) if (run / f).exists() else 0 for f in files)
 
 
@@ -60,17 +60,24 @@ def _run_pieces(root: Path, run: Path) -> tuple[list[dict], dict[int, np.ndarray
     names = {c["id"]: (c["name"] or f"Chicken {c['id'] + 1}") for c in d["chickens"]}
     owner = {t: c["id"] for c in d["chickens"] for t in c["tracks"]}
     aside = {t: label for k, label in ASIDE.items() for t in d.get(k, [])}
+    by_claude = I.answered_by_claude(d)
+    from . import daylight as DL
+    irt = DL.infrared_tracks(d, DL.infrared_s(run, compute=False))  # out of scope: hidden unless asked for
     pieces, vec = [], {}
     for t_s, f in fr.items():
         t = int(t_s)
         if t not in owner and t not in aside:
-            continue
+            aside[t] = "not placed"  # automatic naming found every hen elsewhere then: still to be answered
         crops = f.get("crops") or []
         p = {"run": rel, "track": t, "crop": crops[len(crops) // 2] if crops else "",
              "crops": crops[:: max(1, len(crops) // 4)][:4],
              "hen": names[owner[t]] if t in owner else None, "aside": aside.get(t),
              "chicken": owner.get(t), "clock_s": round(start + f["start"], 1), "t": round(f["start"], 1),
-             "duration_s": round(f["end"] - f["start"], 1), "sure": t in sure, "flag": I.box_flag(d, t)}
+             "duration_s": round(f["end"] - f["start"], 1), "sure": t in sure, "flag": I.box_flag(d, t),
+             **({"claude": True} if t in by_claude else {}), **({"ir": True} if t in irt else {})}
+        m = re.search(r"_f(\d+)\.jpg$", p["crop"])
+        if m and d.get("fps"):  # the moment the picture shows, to open the player there
+            p["pic_t"] = round(int(m[1]) / d["fps"], 2)
         if t in rec:
             p["rec"], p["rec_p"] = rec[t]
         if feats is not None and row_of.get(t):
@@ -101,7 +108,7 @@ def hens_data(root: Path, runs: list[Path]) -> dict:
     # each hen's typical look: mean of her confirmed pieces, over all clips
     cent = {}
     for h in {p["hen"] for p in pieces if p["hen"]}:
-        vs = [v for p, v in zip(pieces, vecs) if p["hen"] == h and p["sure"] and v is not None]
+        vs = [v for p, v in zip(pieces, vecs) if p["hen"] == h and p["sure"] and not p.get("ir") and v is not None]
         if len(vs) >= 3:
             m = np.mean(vs, axis=0)
             cent[h] = m / (np.linalg.norm(m) + 1e-9)

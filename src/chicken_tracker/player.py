@@ -158,6 +158,22 @@ def make_handler(run_dir: Path, video_path: Path, source_video: str | None):
     lock = threading.Lock()
     cache: dict = {}
 
+    def piece_bytes(track: int) -> bytes | None:
+        f = run_dir / "identity" / "identity.json"
+        if not f.exists():
+            return None
+        from . import identity as I
+        key = ("piece", f.stat().st_mtime)
+        with lock:
+            if cache.get("piece_key") != key:  # all pieces' boxes, reloaded when the naming changes
+                cache["piece_key"], cache["piece_det"] = key, I.load_detections(run_dir, json.loads(f.read_text()))
+            det = cache["piece_det"]
+        d = det[det.track_id == track].sort_values("frame")
+        if d.empty:
+            return None
+        return json.dumps({"track": track, "frames": d.frame.astype(int).tolist(),
+                           "boxes": d[["x1", "y1", "x2", "y2"]].to_numpy().round().astype(int).tolist()}).encode()
+
     def overlay_bytes() -> bytes:
         deps = [run_dir / n for n in ("detections_named.csv", "chicken_timeline.csv", "chickens.csv",
                                       "fast_moments.csv", "stations.json", "identity/identity.json", "pecks.csv")]
@@ -253,6 +269,11 @@ def make_handler(run_dir: Path, video_path: Path, source_video: str | None):
                     return self._send(p.read_bytes(), "application/json")
             if path == "/video.mp4":
                 return self._video()
+            m = re.fullmatch(r"/piece/(\d+)\.json", path)
+            if m:  # one piece's boxes, to point it out when the player is opened from a picture
+                b = piece_bytes(int(m[1]))
+                if b:
+                    return self._send(b, "application/json")
             self._send(b'{"error":"not found"}', "application/json", 404)
 
     return Handler
