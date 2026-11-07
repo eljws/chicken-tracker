@@ -45,8 +45,21 @@
   th, td { padding: 5px 8px; text-align: right; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
   th { color: var(--muted); font-weight: 500; }
   th:first-child, td:first-child { text-align: left; }
-  td .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .sw, td .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
   .empty { color: var(--muted); padding: 40px; }
+  .muted { color: var(--muted); }
+  h2.section { grid-column: 1 / -1; margin: 10px 0 -4px; font-size: 17px; }
+  .split { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(260px, 1fr); gap: 18px; align-items: start; }
+  .bf { display: flex; align-items: center; gap: 4px; padding: 3px 0; font-size: 13px; }
+  .bf .nm { width: 70px; flex: none; }
+  .bf .ab { flex: 1; height: 8px; margin: 0 8px; background: var(--grid); border-radius: 4px; overflow: hidden; max-width: 200px; }
+  .bf .ab i { display: block; height: 100%; border-radius: 4px; }
+  table.mx td.c { text-align: center; cursor: default; color: var(--ink); }
+  table.mx td.self { background: repeating-linear-gradient(135deg, transparent 0 4px, #ffffff0a 4px 6px); }
+  table.mx th { text-align: center; white-space: nowrap; }
+  .evs { max-height: 260px; overflow-y: auto; font-size: 13px; }
+  .evs .ev { padding: 3px 6px; border-radius: 4px; cursor: pointer; display: flex; gap: 4px; align-items: center; }
+  .evs .ev:hover { background: #2a2a2a; }
 </style>
 </head>
 <body>
@@ -182,6 +195,149 @@ function table(card) {
       cols.map(([k, , d, f]) => `<td>${(M.totals[h][k] * (f || 1)).toFixed(d)}</td>`).join("") + "</tr>").join("") + "</table>");
 }
 
+// ================================================================ friends and relationships
+const pct = v => v == null ? "–" : (100 * v).toFixed(0) + "%";
+const mins = s => s >= 90 ? (s / 60).toFixed(0) + " min" : s + " s";
+// one hue, light -> dark, for "how much" in the matrices (low values fade into the card)
+const seq = v => `color-mix(in oklab, #3987e5 ${Math.round(8 + 82 * Math.min(1, Math.max(0, v)))}%, var(--surface))`;
+
+// the flock as a ring: a line between two hens, thicker and brighter the more time they spend side by side
+function network(card, S) {
+  const W = Math.min(card.clientWidth - 28, 520), H = 330, cx = W / 2, cy = H / 2 + 4, R = Math.min(W, H) / 2 - 46;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H, style: `max-width:${W}px` }, card);
+  // ring order that puts the closest pairs next to each other, so the strong lines run round the edge, not across
+  const sh = (a, b) => S.together_share[a][b] || 0;
+  const perms = a => a.length < 2 ? [a] : a.flatMap((x, i) => perms([...a.slice(0, i), ...a.slice(i + 1)]).map(p => [x, ...p]));
+  let ring = S.hens, best = -1;
+  for (const p of S.hens.length <= 7 ? perms(S.hens.slice(1)) : [S.hens.slice(1)]) {
+    const r = [S.hens[0], ...p], v = r.reduce((t, h, i) => t + sh(h, r[(i + 1) % r.length]), 0);
+    if (v > best) { best = v; ring = r; } }
+  const pos = {}; ring.forEach((h, i) => { const a = -Math.PI / 2 + i * 2 * Math.PI / S.hens.length; pos[h] = [cx + R * Math.cos(a), cy + R * Math.sin(a)]; });
+  const top = Math.max(0.01, ...S.hens.flatMap(a => S.hens.filter(b => b !== a).map(b => S.together_share[a][b] || 0)));
+  const pairs = []; S.hens.forEach((a, i) => S.hens.slice(i + 1).forEach(b => pairs.push([a, b, S.together_share[a][b] || 0])));
+  pairs.sort((p, q) => p[2] - q[2]);
+  for (const [a, b, v] of pairs) {
+    const k = v / top, [x1, y1] = pos[a], [x2, y2] = pos[b];
+    el("line", { x1, y1, x2, y2, stroke: "var(--ink2)", "stroke-width": 1 + 13 * k, "stroke-opacity": 0.12 + 0.75 * k, "stroke-linecap": "round" }, svg);
+    if (k > 0.35) txt(svg, (x1 + x2) / 2, (y1 + y2) / 2 - 8, pct(v), "val", "middle");
+    const hit = el("line", { x1, y1, x2, y2, stroke: "transparent", "stroke-width": 18, class: "hit" }, svg);
+    hit.onpointermove = e => showTip(e, `<b>${esc(a)} & ${esc(b)}</b><br>side by side ${pct(v)} of the time both were on camera<br>` +
+      `${mins(S.together[a][b])} of ${mins(S.covisible[a][b])}`);
+    hit.onpointerleave = hideTip;
+  }
+  for (const h of S.hens) { const [x, y] = pos[h];
+    el("circle", { cx: x, cy: y, r: 16, fill: colour(h), stroke: "var(--surface)", "stroke-width": 3 }, svg);
+    const below = y > cy + 5;
+    txt(svg, x, below ? y + 34 : y - 24, h, "lab", "middle"); }
+}
+
+// rows x columns, a number per cell, shaded by one hue
+function matrix(card, S, get, fmt, tipf, rowsName, colsName) {
+  const vals = S.hens.flatMap(a => S.hens.filter(b => b !== a).map(b => get(a, b) || 0)), top = Math.max(1e-9, ...vals);
+  card.insertAdjacentHTML("beforeend", `<table class="mx"><tr><th>${rowsName ? `${rowsName} ↓ &nbsp; ${colsName} →` : ""}</th>${S.hens.map(h =>
+    `<th><span class="sw" style="background:${colour(h)}"></span>${esc(h)}</th>`).join("")}</tr>` +
+    S.hens.map(a => `<tr><td><span class="sw" style="background:${colour(a)}"></span>${esc(a)}</td>${S.hens.map(b => a === b ? `<td class="self"></td>` :
+      `<td class="c" data-a="${esc(a)}" data-b="${esc(b)}" style="background:${seq((get(a, b) || 0) / top)}">${fmt(get(a, b))}</td>`).join("")}</tr>`).join("") + "</table>");
+  card.querySelectorAll("td.c").forEach(td => { td.onpointermove = e => showTip(e, tipf(td.dataset.a, td.dataset.b)); td.onpointerleave = hideTip; });
+}
+
+function spreadChart(card, S) {
+  const pts = Object.entries(S.spread).map(([b, v]) => [+b + M.bin_s / 2, v]);
+  if (pts.length < 2) { card.insertAdjacentHTML("beforeend", `<div class="sub">Not enough video with three or more hens on camera.</div>`); return; }
+  const W = card.clientWidth - 28, H = 200, L = 40, R = 12, T = 8, B = 24;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H }, card);
+  const t0 = Math.floor(pts[0][0] / 3600) * 3600, t1 = Math.ceil(pts[pts.length - 1][0] / 3600) * 3600;
+  const ax = axis(Math.max(...pts.map(p => p[1]))), x = t => L + (W - L - R) * (t - t0) / (t1 - t0), y = v => T + (H - T - B) * (1 - v / ax.max);
+  ax.ticks.forEach((v, i) => { el("line", { x1: L, x2: W - R, y1: y(v), y2: y(v), stroke: i ? "var(--grid)" : "var(--axis)" }, svg);
+    txt(svg, L - 6, y(v) + 4, v.toFixed(1), "", "end"); });
+  const hs = (t1 - t0) > 6 * 3600 ? 7200 : 3600;
+  for (let t = t0; t <= t1; t += hs) txt(svg, x(t), H - 6, clock(t), "", "middle");
+  let d = ""; pts.forEach(([t, v], i) => { const gap = i && t - pts[i - 1][0] > M.bin_s * 1.5; d += `${!i || gap ? "M" : "L"}${x(t).toFixed(1)},${y(v).toFixed(1)}`; });
+  el("path", { d, fill: "none", stroke: "var(--ink2)", "stroke-width": 2, "stroke-linejoin": "round" }, svg);
+  for (const [t, v] of pts) { el("circle", { cx: x(t), cy: y(v), r: 4, fill: "var(--ink2)", stroke: "var(--surface)", "stroke-width": 2 }, svg);
+    const hit = el("circle", { cx: x(t), cy: y(v), r: 12, fill: "transparent", class: "hit" }, svg);
+    hit.onpointermove = e => showTip(e, `<b>${v.toFixed(2)} m</b> from the flock's centre, on average<br>${clock(t - M.bin_s / 2)}–${clock(t + M.bin_s / 2)}`);
+    hit.onpointerleave = hideTip; }
+}
+
+// chasing: each chase on the day's clock (a row per chaser, the dot's middle in the chased hen's colour), who chases whom, and the list
+function chasing(S) {
+  const R = S.chase_rule || {}, ch = S.chases || [];
+  const c = card("Chasing", `one hen hurries straight at another (both ≥ ${R.v} m/s, within ${R.gap_m} m, the chaser heading at her and she heading away) ` +
+    `for ≥ ${R.min_s} s · hover a dot, click to watch it (a tracker mix-up can fake one, so check the surprising ones)`, true);
+  if (!ch.length) { c.insertAdjacentHTML("beforeend", `<div class="sub">No chases seen this day.</div>`); return; }
+  const given = h => ch.filter(e => e.a === h).length, got = h => ch.filter(e => e.b === h).length;
+  const most = f => S.hens.slice().sort((a, b) => f(b) - f(a))[0];
+  c.insertAdjacentHTML("beforeend", `<div class="kpis" style="margin-bottom:8px">
+    <div class="kpi"><div class="v">${ch.length}</div><div class="l">chases</div></div>
+    <div class="kpi"><div class="v">${esc(most(given))}</div><div class="l">chases most (${given(most(given))})</div></div>
+    <div class="kpi"><div class="v">${esc(most(got))}</div><div class="l">chased most (${got(most(got))})</div></div></div>`);
+  const W = c.clientWidth - 28, rowH = 28, L = 110, Rr = 12, H = S.hens.length * rowH + 26;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H }, c);
+  const span = M.clips.length ? [M.clips[0].start_s, Math.max(...M.clips.map(k => k.end_s))] : [0, 86400];
+  const t0 = Math.floor(span[0] / 3600) * 3600, t1 = Math.ceil(span[1] / 3600) * 3600, x = t => L + (W - L - Rr) * (t - t0) / (t1 - t0);
+  for (const k of M.clips) el("rect", { x: x(k.start_s), y: 0, width: Math.max(1, x(k.end_s) - x(k.start_s)), height: H - 22, fill: "#ffffff0a" }, svg);
+  const hs = (t1 - t0) > 6 * 3600 ? 7200 : 3600;
+  for (let t = t0; t <= t1; t += hs) { el("line", { x1: x(t), x2: x(t), y1: 0, y2: H - 22, stroke: "var(--grid)" }, svg); txt(svg, x(t), H - 6, clock(t), "", "middle"); }
+  const open = e => window.open(`../run/${e.run.split("/").map(encodeURIComponent).join("/")}/player/#t=${Math.max(0, e.t - 2).toFixed(1)}`, "_blank");
+  S.hens.forEach((h, i) => {
+    const cy = i * rowH + 14;
+    el("line", { x1: L, x2: W - Rr, y1: cy, y2: cy, stroke: "var(--grid)" }, svg);
+    txt(svg, L - 10, cy + 4, `${h} · ${given(h)}`, "lab", "end");
+    for (const e of ch.filter(e => e.a === h)) {
+      const dot = el("circle", { cx: x(e.clock_s), cy, r: 6, fill: colour(e.b), stroke: colour(h), "stroke-width": 3 }, svg);
+      const hit = el("circle", { cx: x(e.clock_s), cy, r: 12, fill: "transparent", class: "hit" }, svg);
+      hit.onpointermove = ev => { dot.setAttribute("r", 8); showTip(ev, `<b>${esc(h)} chased ${esc(e.b)}</b><br>${clockS(e.clock_s)} · ${e.s} s · up to ${e.v.toFixed(1)} m/s<br><span style="color:var(--muted)">click: watch it</span>`); };
+      hit.onpointerleave = () => { dot.setAttribute("r", 6); hideTip(); };
+      hit.onclick = () => open(e);
+    }
+  });
+  c.insertAdjacentHTML("beforeend", `<div class="sub" style="margin:6px 0 10px">a row per chaser · ring = the chaser's colour, middle = the hen being chased</div>`);
+  const wrap = document.createElement("div"); wrap.className = "split"; c.appendChild(wrap);
+  const left = document.createElement("div"); wrap.appendChild(left);
+  matrix(left, S, (a, b) => S.chase_matrix[a][b], v => v ? v : "·", (a, b) => `<b>${esc(a)} chased ${esc(b)}</b> ${S.chase_matrix[a][b]}×<br>the other way: ${S.chase_matrix[b][a]}×`, "chaser", "chased");
+  wrap.insertAdjacentHTML("beforeend", `<div class="evs">${ch.map((e, i) => `<div class="ev" data-c="${i}"><span class="muted">${clockS(e.clock_s)}</span>
+    <span class="sw" style="background:${colour(e.a)}"></span>${esc(e.a)} <span class="muted">chased</span> <span class="sw" style="background:${colour(e.b)}"></span>${esc(e.b)}
+    <span class="muted">· ${e.s} s · ${e.v.toFixed(1)} m/s ↗</span></div>`).join("")}</div>`);
+  wrap.querySelectorAll("[data-c]").forEach(d => d.onclick = () => open(ch[+d.dataset.c]));
+}
+
+function social() {
+  const S = M.social;
+  if (!S || !S.hens || S.hens.length < 2) return;
+  $("#main").insertAdjacentHTML("beforeend", `<h2 class="section">🤝 Friends and relationships</h2>`);
+  const f = card("Who hangs out with whom", `line thickness = share of the time two hens are within ${S.close_m} m of each other, out of the time both are on camera ` +
+    `(so a hen seen less isn't counted as less friendly) · hover a line for the numbers`, true);
+  const wrap = document.createElement("div"); wrap.className = "split"; f.appendChild(wrap);
+  const left = document.createElement("div"), right = document.createElement("div"); wrap.append(left, right);
+  network(left, S);
+  right.innerHTML = `<div class="sub" style="margin-top:0">Best friend: the hen she is most often nearest to</div>` + S.hens.map(h => { const b = S.best_friend[h];
+    return `<div class="bf"><span class="sw" style="background:${colour(h)}"></span><b>${esc(h)}</b> <span class="muted">→</span> ${b ?
+      `<span class="sw" style="background:${colour(b.hen)}"></span>${esc(b.hen)} <span class="muted">· nearest ${pct(b.share)} of the time</span>` : "–"}</div>`; }).join("") +
+    `<div class="sub" style="margin-top:14px">On her own: share of her time with no hen within ${S.alone_m} m (while another hen is on camera)</div>` +
+    S.hens.map(h => `<div class="bf"><span class="sw" style="background:${colour(h)}"></span><span class="nm">${esc(h)}</span><span class="ab"><i style="width:${(100 * (S.alone_share[h] || 0) / Math.max(0.01, ...S.hens.map(k => S.alone_share[k] || 0))).toFixed(0)}%;background:${colour(h)}"></i></span>${pct(S.alone_share[h])}</div>`).join("");
+
+  matrix(card("Side by side", `% of the time both are on camera that they're within ${S.close_m} m · the same for both, so the table mirrors`), S,
+    (a, b) => S.together_share[a][b], pct, (a, b) => `<b>${esc(a)} & ${esc(b)}</b><br>${pct(S.together_share[a][b])} · ${mins(S.together[a][b])} of ${mins(S.covisible[a][b])}`, "", "");
+  matrix(card("Who follows whom", "seconds a hen walks where the other walked 2–4 s before (both moving) · read across: the row hen follows the column hen"), S,
+    (a, b) => S.follows[a][b], v => v ? mins(v) : "·", (a, b) => `<b>${esc(a)} follows ${esc(b)}</b><br>${mins(S.follows[a][b])}<br>the other way: ${mins(S.follows[b][a])}`, "follower", "leader");
+
+  const p = card("Pecking order", "a hen walks up to one standing still, and within 3 s that one moves away while she stays · " +
+    "ranked by the share of these she won · click a moment to watch it (a tracker mix-up can fake one, so check)", true);
+  const n = S.events.length;
+  p.insertAdjacentHTML("beforeend", `<div class="split"><div><table><tr><th>rank</th><th>hen</th><th>moved others away</th><th>was moved away</th></tr>` +
+    S.pecking_order.map((h, i) => `<tr><td>${i + 1}</td><td style="text-align:left"><span class="sw" style="background:${colour(h)}"></span>${esc(h)}</td><td>${S.wins[h]}</td><td>${S.losses[h]}</td></tr>`).join("") +
+    `</table>${n < 30 ? `<div class="sub" style="margin-top:8px">Only ${n} such moment${n === 1 ? "" : "s"} this day: an early hint, it firms up over more days.</div>` : ""}</div>` +
+    `<div class="evs">${S.events.map((e, i) => `<div class="ev" data-i="${i}"><span class="muted">${clockS(e.clock_s)}</span>
+      <span class="sw" style="background:${colour(e.a)}"></span>${esc(e.a)} <span class="muted">moved</span> <span class="sw" style="background:${colour(e.b)}"></span>${esc(e.b)} <span class="muted">away ↗</span></div>`).join("") || '<span class="muted">none seen</span>'}</div></div>`);
+  p.querySelectorAll(".ev").forEach(d => d.onclick = () => { const e = S.events[+d.dataset.i];
+    window.open(`../run/${e.run.split("/").map(encodeURIComponent).join("/")}/player/#t=${Math.max(0, e.t - 3).toFixed(1)}`, "_blank"); });
+
+  chasing(S);
+
+  spreadChart(card("How close the flock keeps through the day", "average distance of each hen from the flock's centre, per 10 minutes (when 3+ hens are on camera) · lower = huddled together", true), S);
+}
+
 function card(title, sub, wide) {
   const c = document.createElement("div"); c.className = "card" + (wide ? " wide" : "");
   c.innerHTML = `<h2>${title}</h2><div class="sub">${sub}</div>`; $("#main").appendChild(c); return c;
@@ -215,6 +371,7 @@ function render() {
     "(a tracker mix-up between two hens can look like a dash, so check the surprising ones)", true);
   runsChart(r);
   table(card("All numbers", "the same figures as the charts, per hen", true));
+  social();
 }
 
 async function load() {

@@ -159,13 +159,14 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
         never waits for them: after a clip is renamed or reprocessed its cache is redone here, not on the
         first click. A fresh cache costs only a few file-time checks."""
         from . import metrics as Mx
+        from . import social as So
         from . import timeline as TL
         while True:
             busy = {j["run"] for j in list(jobs)}
             for run in sorted(D.find_runs(root), reverse=True):  # newest days first
                 if str(run.relative_to(root)) in busy:
                     continue
-                for f in (Mx.clip_metrics, TL.clip_hens):
+                for f in (Mx.clip_metrics, TL.clip_hens, So.clip_social):
                     try:
                         f(run)
                     except Exception:  # noqa: BLE001 - half-written files mid-processing: next round
@@ -324,6 +325,9 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
                                if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(r.relative_to(root)).split("/")[0])})
                 day = (parse_qs(query).get("day") or [days[-1] if days else ""])[0]
                 body = Mx.day_metrics(root, all_runs, day) if day else {}
+                if day:
+                    from . import social as So
+                    body["social"] = So.day_social(root, all_runs, day)
                 return self._send(json.dumps({"days": days, **body}).encode(), "application/json")
             if path == "/rodents":
                 return self._redirect(f"/rodents/{q}")
