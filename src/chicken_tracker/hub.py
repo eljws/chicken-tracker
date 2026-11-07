@@ -154,6 +154,26 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
 
     threading.Thread(target=worker, daemon=True).start()
 
+    def warmer():
+        """Keep each clip's Metrics and Timeline numbers up to date in the background, so picking a day
+        never waits for them: after a clip is renamed or reprocessed its cache is redone here, not on the
+        first click. A fresh cache costs only a few file-time checks."""
+        from . import metrics as Mx
+        from . import timeline as TL
+        while True:
+            busy = {j["run"] for j in list(jobs)}
+            for run in sorted(D.find_runs(root), reverse=True):  # newest days first
+                if str(run.relative_to(root)) in busy:
+                    continue
+                for f in (Mx.clip_metrics, TL.clip_hens):
+                    try:
+                        f(run)
+                    except Exception:  # noqa: BLE001 - half-written files mid-processing: next round
+                        pass
+            time.sleep(30)
+
+    threading.Thread(target=warmer, daemon=True).start()
+
     def find_run(rel: str) -> Path | None:
         p = (root / rel).resolve()
         return p if root in p.parents and ((p / "meta.json").exists() or (p / "progress.json").exists()) else None  # running: live picture
