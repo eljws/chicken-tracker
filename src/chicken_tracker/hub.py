@@ -309,6 +309,11 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
                 if self.command == "POST":
                     TL.scan_in_background(root)
                 return self._send(json.dumps({"timeline": TL.load(root), "scan": TL.scan_status()}).encode(), "application/json")
+            if path == "/timeline/hens":  # the hens of every processed clip of one dawn-to-dawn day
+                from urllib.parse import parse_qs
+                from . import timeline as TL
+                day = (parse_qs(query).get("day") or [""])[0]
+                return self._send(json.dumps(TL.day_hens(root, day)).encode(), "application/json")
             m = re.fullmatch(r"/timeline/video/(\d{4}-\d{2}-\d{2})/([\w\-]+\.mp4)", path)
             if m:  # only recordings listed in the timeline are served
                 from . import timeline as TL

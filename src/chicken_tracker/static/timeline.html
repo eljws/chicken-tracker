@@ -34,6 +34,13 @@
   #tip { position: absolute; top: -26px; background: #000; border: 1px solid #555; border-radius: 4px; padding: 1px 6px;
          font-size: 12px; pointer-events: none; white-space: nowrap; display: none; transform: translateX(-50%); }
   #info a { color: #90caf9; }
+  #ov { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  #rowsbox { position: relative; cursor: pointer; user-select: none; margin-bottom: 4px; }
+  #rows { width: 100%; display: block; }
+  #tip2 { position: absolute; background: #000; border: 1px solid #555; border-radius: 4px; padding: 1px 6px;
+          font-size: 12px; pointer-events: none; white-space: nowrap; display: none; transform: translate(-50%, -110%); z-index: 2; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; margin-right: 8px; }
+  .chip i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
   .mk { font-size: 12px; }
 </style>
 </head>
@@ -51,6 +58,7 @@
   <span id="msg">Loading…</span>
   <video id="va" muted playsinline preload="auto"></video>
   <video id="vb" class="hidden" muted playsinline preload="auto"></video>
+  <canvas id="ov"></canvas>
   <div id="gapnote"></div>
 </div>
 <footer>
@@ -60,14 +68,18 @@
     <button id="pmark" title="Previous marker ( [ )">⏮ marker</button>
     <button id="nmark" title="Next marker ( ] )">marker ⏭</button>
     <span class="mk" id="marks"></span>
+    <label class="muted" title="Boxes and names from the processed clips, drawn on the video"><input type="checkbox" id="showhens" checked> hens on video</label>
     <span class="muted" style="margin-left:auto"><kbd>space</kbd> play · <kbd>←</kbd><kbd>→</kbd> 10 s · <kbd>shift</kbd>+<kbd>←</kbd><kbd>→</kbd> 5 min ·
       <kbd>[</kbd><kbd>]</kbd> markers</span>
   </div>
   <div id="bar"><canvas id="cv"></canvas><div id="tip"></div></div>
+  <div id="rowsbox"><canvas id="rows"></canvas><div id="tip2"></div></div>
   <div class="row muted" id="info"></div>
   <div class="row muted" style="margin-top:4px">
     <span>☀ dawn = the camera switches from infrared to colour · 🌙 dusk = colour to infrared · a day runs from one dawn to the next ·
-      shaded: <span style="color:var(--dawn)">■ colour</span> <span style="color:var(--dusk)">■ infrared</span> · green line = processed clip · hatched = no recording</span>
+      shaded: <span style="color:var(--dawn)">■ colour</span> <span style="color:var(--dusk)">■ infrared</span> · green line = processed clip · hatched = no recording ·
+      hen rows: <b>■</b> seen, faint = hidden (behind something), dark grey = processed but not seen, black = not processed ·
+      <span style="color:#fff">▲</span> fast run · <span style="color:#ff5252">▲</span> illegal move · small bars = pecks</span>
     <span style="margin-left:auto"><button id="rescan" title="Look for new recordings and find the switches again (new files only; a few seconds each)">↻ Rescan recordings</button>
       <span id="scan"></span></span>
   </div>
@@ -109,6 +121,7 @@ function pickDay(i, at) {
   $("#marks").innerHTML = mk.map(m => `<button data-at="${m.at}">${m.kind === "dawn" ? "☀ dawn" : "🌙 dusk"} ${hms(ms(m.at))}</button>`).join(" ");
   document.querySelectorAll("#marks button").forEach(b => b.onclick = () => seekWall(ms(b.dataset.at)));
   drawBar();
+  loadHens();
   seekWall(at && at >= DAY.s && at < DAY.e ? at : (DAY.dawn ? ms(DAY.dawn) : DAY.s));
 }
 $("#day").onchange = e => pickDay(+e.target.value);
@@ -174,6 +187,8 @@ function tick() {
     } else if (!n && atEnd && playing) setPlaying(false);
     if (wall >= DAY.e && playing) setPlaying(false);
     drawHead();
+    drawOverlay();
+    nowChips();
     if (!tick.h || Date.now() - tick.h > 1000) { tick.h = Date.now(); history.replaceState(null, "", `#day=${DAY.day}&t=${new Date(wall - new Date(wall).getTimezoneOffset() * 60000).toISOString().slice(0, 19)}`); }
   }
 }
@@ -257,8 +272,9 @@ function drawHead() {
   if (!barBase || !DAY) return;
   cx.putImageData(barBase, 0, 0);
   const x = xOf(wall); cx.fillStyle = "#fff"; cx.fillRect(x - devicePixelRatio, 0, 2 * devicePixelRatio, cv.height);
+  if (rowsBase) { rx.putImageData(rowsBase, 0, 0); rx.fillStyle = "#fff"; rx.fillRect(x - devicePixelRatio, 0, 2 * devicePixelRatio, rc.height); }
 }
-window.addEventListener("resize", () => DAY && drawBar());
+window.addEventListener("resize", () => { if (DAY) { drawBar(); drawRows(); drawOverlay(); } });
 const bar = $("#bar"), tip = $("#tip");
 const tAt = e => { const r = bar.getBoundingClientRect(); return DAY.s + (e.clientX - r.left) / r.width * (DAY.e - DAY.s); };
 bar.onclick = e => seekWall(tAt(e));
@@ -268,6 +284,126 @@ bar.onmousemove = e => {
   tip.textContent = `${hms(t)} · ${c ? (phaseAt(t) === "night" ? "🌙 infrared" : "☀ colour") + (c.run ? " · processed" : "") : "no recording"}`;
 };
 bar.onmouseleave = () => tip.style.display = "none";
+
+// ------------------------------------------------------------- the hens: rows across the day
+let HV = null, rowsBase = null;
+const rc = $("#rows"), rx = rc.getContext("2d"), ROW = 16, RGAP = 2;
+async function loadHens() {
+  const day = DAY.day;
+  HV = null; rowsBase = null; drawRows();
+  const j = await (await fetch(`hens?day=${encodeURIComponent(day)}`)).json();
+  if (!DAY || DAY.day !== day) return;
+  j.clips.forEach(c => { c.s = ms(c.start); c.e = ms(c.end); });
+  HV = j; drawRows(); drawHead();
+}
+function drawRows() {
+  const r = devicePixelRatio, n = HV ? HV.hens.length : 0;
+  rc.style.height = (n ? n * (ROW + RGAP) : 0) + "px";
+  rc.width = rc.clientWidth * r; rc.height = n * (ROW + RGAP) * r;
+  if (!n || !DAY) { rowsBase = null; return; }
+  const W_ = rc.width, rh = ROW * r, X = t => (t - DAY.s) / (DAY.e - DAY.s) * W_;
+  HV.hens.forEach((h, i) => {
+    const y = i * (ROW + RGAP) * r;
+    rx.fillStyle = "#0b0b0b"; rx.fillRect(0, y, W_, rh);                     // not processed
+    for (const c of HV.clips) {
+      rx.fillStyle = "#2a2a2a"; rx.fillRect(X(c.s), y, Math.max(1, X(c.e) - X(c.s)), rh);  // processed, not seen
+      const hh = c.hens[h.name]; if (!hh) continue;
+      rx.fillStyle = h.color;
+      rx.globalAlpha = 0.35; for (const [a, b] of hh.hidden) rx.fillRect(X(c.s + a * 1000), y, Math.max(1, X(c.s + b * 1000) - X(c.s + a * 1000)), rh);
+      rx.globalAlpha = 0.9;  for (const [a, b] of hh.seen) rx.fillRect(X(c.s + a * 1000), y, Math.max(1, X(c.s + b * 1000) - X(c.s + a * 1000)), rh);
+      rx.globalAlpha = 1;
+      for (const [t, k] of (c.pecks[h.name] || [])) {  // pecks per 10 s: little bars at the bottom
+        rx.fillStyle = "rgba(0,0,0,.75)"; rx.fillRect(X(c.s + t * 1000), y + rh - Math.min(rh * 0.5, (1 + k / 4) * r), Math.max(1, X(c.s + (t + 10) * 1000) - X(c.s + t * 1000)), Math.min(rh * 0.5, (1 + k / 4) * r));
+      }
+    }
+    for (const c of HV.clips) for (const e of c.events) {
+      if (e.hen !== h.name) continue;
+      const x = X(c.s + e.t * 1000);
+      rx.fillStyle = e.kind === "illegal" ? "#ff5252" : "#fff";
+      rx.beginPath(); rx.moveTo(x - 3 * r, y + 6 * r); rx.lineTo(x + 3 * r, y + 6 * r); rx.lineTo(x, y); rx.closePath(); rx.fill();
+    }
+    rx.font = `600 ${11 * r}px system-ui`; const tw = rx.measureText(h.name).width;  // name at the left
+    rx.fillStyle = "rgba(0,0,0,.7)"; rx.fillRect(0, y, tw + 8 * r, rh);
+    rx.fillStyle = h.color; rx.fillText(h.name, 4 * r, y + rh - 4 * r);
+  });
+  rowsBase = rx.getImageData(0, 0, rc.width, rc.height);
+}
+function henAt(name, t) {  // "seen" / "hidden" / "not seen" / "not processed"
+  const c = HV && HV.clips.find(c => t >= c.s && t < c.e);
+  if (!c) return "not processed";
+  const h = c.hens[name], o = (t - c.s) / 1000;
+  if (h && h.seen.some(([a, b]) => o >= a && o <= b)) return "seen";
+  if (h && h.hidden.some(([a, b]) => o >= a && o <= b)) return "hidden";
+  return "not seen";
+}
+const rbox = $("#rowsbox"), tip2 = $("#tip2");
+const rowAt = e => { const r = rc.getBoundingClientRect(); return { t: DAY.s + (e.clientX - r.left) / r.width * (DAY.e - DAY.s),
+  i: Math.floor((e.clientY - r.top) / (ROW + RGAP)), x: e.clientX - r.left, y: e.clientY - r.top }; };
+function eventNear(i, t, px) {
+  const h = HV.hens[i]; if (!h) return null; const span = (DAY.e - DAY.s) / rc.clientWidth * px;
+  let best = null;
+  for (const c of HV.clips) for (const e of c.events) {
+    const et = c.s + e.t * 1000;
+    if (e.hen === h.name && Math.abs(et - t) <= span && (!best || Math.abs(et - t) < Math.abs(best.t - t))) best = { ...e, t: et };
+  }
+  return best;
+}
+rbox.onmousemove = e => {
+  if (!HV) return;
+  const p = rowAt(e), h = HV.hens[p.i]; if (!h) { tip2.style.display = "none"; return; }
+  const ev = eventNear(p.i, p.t, 5);
+  tip2.style.display = "block"; tip2.style.left = p.x + "px"; tip2.style.top = p.y + "px";
+  tip2.textContent = ev ? `${hms(ev.t)} · ${ev.kind === "illegal" ? "⚠ " : "🏃 "}${ev.detail}` : `${h.name} · ${hms(p.t)} · ${henAt(h.name, p.t)}`;
+};
+rbox.onmouseleave = () => tip2.style.display = "none";
+rbox.onclick = e => { if (!HV) return; const p = rowAt(e), ev = eventNear(p.i, p.t, 5); seekWall(ev ? ev.t - 2000 : p.t); };
+function nowChips() {
+  if (!HV || !HV.hens.length || !cur) return;
+  const html = HV.hens.map(h => { const s = henAt(h.name, wall);
+    return `<span class="chip" style="opacity:${s === "seen" ? 1 : s === "hidden" ? 0.7 : 0.35}"><i style="background:${h.color}"></i>${h.name} ${s === "seen" ? "" : s === "hidden" ? "(hidden)" : s === "not seen" ? "—" : ""}</span>`; }).join("");
+  const el = $("#nowhens") || (() => { const sp = document.createElement("span"); sp.id = "nowhens"; sp.style.marginLeft = "auto"; $("#info").after(sp); return sp; })();
+  if (el._h !== html) { el._h = html; el.innerHTML = html; }
+}
+
+// ------------------------------------------------------------- the hens on the video (processed clips)
+const ov = $("#ov"), ox = ov.getContext("2d"), OV = {};
+const showHens = $("#showhens");
+showHens.checked = localStorage.getItem("tlHens") !== "0";
+showHens.onchange = () => { localStorage.setItem("tlHens", showHens.checked ? "1" : "0"); drawOverlay(); };
+function overlayFor(run) {
+  if (!run) return null;
+  if (!(run in OV)) { OV[run] = null; fetch(`../run/${run}/player/overlay.json`).then(r => r.ok ? r.json() : null).then(d => { OV[run] = d || false; drawOverlay(); }).catch(() => OV[run] = false); }
+  return OV[run] || null;
+}
+function drawOverlay() {
+  const r = devicePixelRatio, st = $("#stage");
+  if (ov.width !== st.clientWidth * r || ov.height !== st.clientHeight * r) { ov.width = st.clientWidth * r; ov.height = st.clientHeight * r; }
+  ox.clearRect(0, 0, ov.width, ov.height);
+  if (!cur || !showHens.checked) return;
+  const n = nextClip(cur); if (n && n.run && cur.e - wall < 60000) overlayFor(n.run);  // get the next one ready
+  const D = overlayFor(cur.run), v = V();
+  if (!D || !v.videoWidth) return;
+  const s = Math.min(ov.width / v.videoWidth, ov.height / v.videoHeight), k = s * v.videoWidth / D.width;
+  const x0 = (ov.width - v.videoWidth * s) / 2, y0 = (ov.height - v.videoHeight * s) / 2;
+  const f = Math.round(v.currentTime * D.fps), t = v.currentTime, a = D.frames[f];
+  const lw = 2 * r, fs = 13 * r;
+  ox.font = `600 ${fs}px system-ui`; ox.lineJoin = "round";
+  const label = (txt, x, y, col) => { ox.lineWidth = 3 * r; ox.strokeStyle = "rgba(0,0,0,.85)"; ox.strokeText(txt, x, y); ox.fillStyle = col; ox.fillText(txt, x, y); };
+  const seen = new Set();
+  if (a) for (let j = 0; j < a.length; j += 6) {
+    const c = D.chickens[a[j]], [x1, y1, x2, y2] = [a[j + 1], a[j + 2], a[j + 3], a[j + 4]].map((q, m) => (m % 2 ? y0 : x0) + q * k);
+    seen.add(a[j]);
+    ox.strokeStyle = c.color; ox.lineWidth = lw; ox.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    label(c.name, x1, y1 - 4 * r, c.color);
+  }
+  for (const h of D.hidden || []) {  // hidden: dashed where she was last seen
+    if (t < h.from || t > h.to || seen.has(h.c)) continue;
+    const c = D.chickens[h.c], [x1, y1, x2, y2] = h.box.map((q, m) => (m % 2 ? y0 : x0) + q * k);
+    ox.globalAlpha = 0.6; ox.strokeStyle = c.color; ox.lineWidth = lw; ox.setLineDash([6 * r, 5 * r]);
+    ox.strokeRect(x1, y1, x2 - x1, y2 - y1); ox.setLineDash([]); label(c.name + "?", x1, y1 - 4 * r, c.color); ox.globalAlpha = 1;
+  }
+}
+vids.forEach(v => { if ("requestVideoFrameCallback" in v) { const cb = () => { if (v === V()) drawOverlay(); v.requestVideoFrameCallback(cb); }; v.requestVideoFrameCallback(cb); } });
 
 // ------------------------------------------------------------- rescanning
 function showScan(s) {
