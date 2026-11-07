@@ -29,7 +29,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-KINDS = ("detector", "recognizer", "pose", "seg")
+KINDS = ("detector", "recognizer", "pose", "seg", "rodent")
 ROOT = Path("records")
 BACKUP_ROOT = Path.home() / "chicken-tracker-backups"
 
