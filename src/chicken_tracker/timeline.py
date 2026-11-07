@@ -311,6 +311,7 @@ def clip_phases(tl: dict, name: str) -> list[tuple[float, float, str]]:
 
 # ------------------------------------------------------------------ hens across a day
 HENS_FILE = "timeline_hens.json"
+RUN_MIN_M_S = 0.8  # a real run (as on the Metrics page); slower "fastest moments" aren't events
 _HEN_SRC = ("chicken_timeline.csv", "fast_moments.csv", "pecks.csv", "dots.json", "meta.json")
 
 
@@ -332,7 +333,7 @@ def clip_hens(run: Path) -> dict | None:
     run = Path(run)
     if not (run / "chicken_timeline.csv").exists():
         return None
-    key = [round((run / f).stat().st_mtime, 2) if (run / f).exists() else 0 for f in _HEN_SRC]
+    key = [round((run / f).stat().st_mtime, 2) if (run / f).exists() else 0 for f in _HEN_SRC] + [RUN_MIN_M_S]
     cf = run / HENS_FILE
     if cf.exists():
         try:
@@ -351,8 +352,9 @@ def clip_hens(run: Path) -> dict | None:
     events = []
     if (run / "fast_moments.csv").exists():
         for _, r in pd.read_csv(run / "fast_moments.csv").iterrows():
-            events.append({"kind": "run", "hen": r.chicken, "t": round(float(r.at_s), 2),
-                           "detail": f"{r.chicken} runs {r.speed_m_s:.1f} m/s"})
+            if r.speed_m_s >= RUN_MIN_M_S:
+                    events.append({"kind": "run", "hen": r.chicken, "t": round(float(r.at_s), 2),
+                               "detail": f"{r.chicken} runs {r.speed_m_s:.1f} m/s"})
     if (run / "dots.json").exists():
         try:
             for e in json.loads((run / "dots.json").read_text()).get("illegal", []):

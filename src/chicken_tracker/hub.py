@@ -309,6 +309,9 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
                 if self.command == "POST":
                     TL.scan_in_background(root)
                 return self._send(json.dumps({"timeline": TL.load(root), "scan": TL.scan_status()}).encode(), "application/json")
+            if path == "/timeline/overlay.js":
+                return self._send((resources.files("chicken_tracker") / "static" / "overlay.js").read_bytes(),
+                                  "text/javascript; charset=utf-8")
             if path == "/timeline/hens":  # the hens of every processed clip of one dawn-to-dawn day
                 from urllib.parse import parse_qs
                 from . import timeline as TL
