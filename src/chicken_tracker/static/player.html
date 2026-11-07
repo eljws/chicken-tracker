@@ -15,8 +15,15 @@
   #clock { font-variant-numeric: tabular-nums; font-size: 18px; margin-left: auto; }
   #stage { position: relative; display: flex; align-items: center; justify-content: center; min-height: 0;
            min-width: 0; background: #000; }
-  #wrap { position: relative; max-width: 100%; max-height: 100%; }
-  video { display: block; max-width: 100%; max-height: calc(100vh - 170px); }
+  #wrap { position: relative; max-width: 100%; max-height: 100%; overflow: hidden; }
+  #wrap.zoomed { cursor: grab; } #wrap.panning { cursor: grabbing; }
+  video { display: block; max-width: 100%; max-height: calc(100vh - 170px); transform-origin: 0 0; }
+  #pinfo { position: absolute; top: 8px; left: 8px; z-index: 3; background: rgba(0,0,0,.8); color: #eee; font-size: 13px;
+            padding: 6px 10px; border-radius: 6px; border: 1px solid #fff; display: none; max-width: calc(100% - 30px); }
+  #pinfo b.now { color: #fff; background: #c62828; padding: 0 5px; border-radius: 3px; }
+  #pinfo button { background: #333; color: #eee; border: 1px solid #666; border-radius: 4px; padding: 2px 8px; margin-left: 6px; cursor: pointer; font-size: 12px; }
+  #zoomtag { position: absolute; top: 6px; right: 8px; background: rgba(0,0,0,.65); color: #eee; font-size: 12px;
+             padding: 2px 8px; border-radius: 4px; pointer-events: none; display: none; }
   #ov { position: absolute; inset: 0; pointer-events: none; }
   aside { background: var(--panel); border-left: 1px solid var(--line); overflow: auto; padding: 10px 12px;
           grid-row: 2 / 4; grid-column: 2; }
@@ -51,9 +58,11 @@
 </header>
 <div id="stage">
   <span id="loading">Loading…</span>
+  <div id="pinfo"></div>
   <div id="wrap">
     <video id="v" src="video.mp4" preload="auto" muted playsinline></video>
     <canvas id="ov"></canvas>
+    <span id="zoomtag"></span>
   </div>
 </div>
 <aside>
@@ -78,7 +87,7 @@
   <div id="controls">
     <button id="play">▶ Play</button>
     <span id="speeds"></span>
-    <span class="keys"><kbd>space</kbd> play · <kbd>←</kbd><kbd>→</kbd> 5 s · <kbd>,</kbd><kbd>.</kbd> frame</span>
+    <span class="keys"><kbd>space</kbd> play · <kbd>←</kbd><kbd>→</kbd> 5 s · <kbd>,</kbd><kbd>.</kbd> frame · scroll on the video = zoom, drag = move, double-click / <kbd>0</kbd> = back</span>
   </div>
   <canvas id="tl"></canvas>
 </footer>
@@ -177,6 +186,11 @@ function buildTimeline() {
     for (let x = 0; x < bins; x++) if (seen[i][x]) tctx.fillRect(x, i * rowH + 1, 1, rowH - 2);
   });
   tctx.globalAlpha = 1;
+  if (PC) {  // the picture's stretch on the timeline
+    const x1 = PC.a * D.fps / total * W, x2 = Math.max(x1 + 3, PC.b * D.fps / total * W);
+    tctx.fillStyle = "rgba(255,255,255,.28)"; tctx.fillRect(x1, 0, x2 - x1, H);
+    tctx.fillStyle = "#fff"; tctx.fillRect(x1, 0, 2, H); tctx.fillRect(x2 - 2, 0, 2, H);
+  }
   tl._base = tctx.getImageData(0, 0, W, H);
 }
 function drawPlayhead() {
@@ -191,14 +205,96 @@ tl.onclick = e => { const r = tl.getBoundingClientRect(); seek((e.clientX - r.le
 function resize() {
   ov.width = v.clientWidth * devicePixelRatio; ov.height = v.clientHeight * devicePixelRatio;
   ov.style.width = v.clientWidth + "px"; ov.style.height = v.clientHeight + "px";
+  typeof applyZoom === "function" && Z > 1 ? applyZoom() : draw();
+}
+// overlay size unit in canvas px: follows the video's size on screen, not the browser's page zoom
+// (page zoom raises devicePixelRatio while the video stays the same size, which blew the text up)
+const unit = () => Math.max(1, Math.min(devicePixelRatio, ov.width / 900));
+window.addEventListener("resize", () => { resize(); buildTimeline(); });
+
+// zoom into the video (scroll wheel or trackpad pinch on it); the overlay is drawn on top at screen
+// resolution, so boxes, names and skeletons keep their normal size on screen however far you zoom
+let Z = 1, TX = 0, TY = 0;  // zoom factor and pan (CSS px of the video box)
+const wrap = document.getElementById("wrap"), ztag = document.getElementById("zoomtag");
+function applyZoom() {
+  const w = v.clientWidth, h = v.clientHeight;
+  TX = Math.min(0, Math.max(w - w * Z, TX)); TY = Math.min(0, Math.max(h - h * Z, TY));
+  v.style.transform = Z === 1 ? "" : `translate(${TX}px, ${TY}px) scale(${Z})`;
+  wrap.classList.toggle("zoomed", Z > 1);
+  ztag.style.display = Z > 1 ? "block" : "none"; ztag.textContent = `${Z.toFixed(1)}× · double-click to reset`;
   draw();
 }
-window.addEventListener("resize", () => { resize(); buildTimeline(); });
+function zoomAt(px, py, nz) {
+  nz = Math.max(1, Math.min(10, nz));
+  TX = px - (px - TX) * nz / Z; TY = py - (py - TY) * nz / Z; Z = nz;
+  if (Z < 1.02) { Z = 1; TX = TY = 0; }
+  applyZoom();
+}
+wrap.addEventListener("wheel", e => {
+  e.preventDefault();  // zoom the video, not the whole page
+  const r = wrap.getBoundingClientRect(), d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+  zoomAt(e.clientX - r.left, e.clientY - r.top, Z * Math.exp(-d * (e.ctrlKey ? 0.01 : 0.0015)));
+}, { passive: false });
+wrap.addEventListener("dblclick", () => { Z = 1; TX = TY = 0; applyZoom(); });
+wrap.addEventListener("mousedown", e => {
+  if (Z === 1 || e.button !== 0) return;
+  e.preventDefault(); wrap.classList.add("panning");
+  const x0 = e.clientX - TX, y0 = e.clientY - TY;
+  const move = m => { TX = m.clientX - x0; TY = m.clientY - y0; applyZoom(); };
+  const up = () => { wrap.classList.remove("panning"); removeEventListener("mousemove", move); removeEventListener("mouseup", up); };
+  addEventListener("mousemove", move); addEventListener("mouseup", up);
+});
 v.addEventListener("loadedmetadata", () => {
   document.getElementById("loading").remove(); resize();
   const t = /[#&]t=([\d.]+)/.exec(location.hash);  // player/#t=123.4 opens a moment (e.g. a run from Metrics)
   if (t) seek(Math.max(0, +t[1] - 2));
+  loadPiece();
 });
+
+// opened from a picture (checks, Hens page): point out that piece - where (white box) and when (banner + timeline band)
+let PC = null;
+async function loadPiece() {
+  const q = new URLSearchParams(location.hash.slice(1)), n = q.get("piece");
+  if (!n) return;
+  while (!D) await new Promise(r => setTimeout(r, 100));
+  try {
+    const r = await fetch(`piece/${n}.json`); if (!r.ok) throw 0;
+    const p = await r.json(), at = {};
+    p.frames.forEach((f, i) => at[f] = p.boxes[i]);
+    const fps = D.fps;
+    PC = { ...p, at, name: q.get("name") || "",
+           a: q.get("a") != null ? +q.get("a") : p.frames[0] / fps, b: q.get("b") != null ? +q.get("b") : p.frames[p.frames.length - 1] / fps };
+    buildTimeline(); draw();
+  } catch { const el = document.getElementById("pinfo"); el.style.display = "block";
+    el.textContent = `Piece #${n} isn't in this clip's naming any more (it may have been cut or merged).`; }
+}
+function pieceBoxNear(f) {  // its box at frame f, or the nearest one within 3 s before/after
+  if (PC.at[f]) return [PC.at[f], 0];
+  const fr = PC.frames, w = 3 * D.fps;
+  if (f < fr[0] && fr[0] - f <= w) return [PC.at[fr[0]], 1];
+  if (f > fr[fr.length - 1] && f - fr[fr.length - 1] <= w) return [PC.at[fr[fr.length - 1]], -1];
+  let lo = 0, hi = fr.length - 1;  // inside a gap in the piece: the frame just before
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; fr[m] <= f ? lo = m : hi = m - 1; }
+  return fr[lo] <= f && f - fr[lo] <= w && f <= fr[fr.length - 1] ? [PC.at[fr[lo]], 2] : [null, 0];
+}
+function pieceBanner(t) {
+  const el = document.getElementById("pinfo"); if (!PC) return;
+  const st = t < PC.a ? `starts in <b>${(PC.a - t).toFixed(1)} s</b>` : t <= PC.b ? `<b class="now">● NOW</b> — the white box`
+           : `ended <b>${(t - PC.b).toFixed(1)} s</b> ago`;
+  const html = `📍 The picture's piece: <b>#${PC.track}${PC.name ? " " + PC.name.replace(/[<&]/g, "") : ""}</b> · ${clockAt(PC.a)}–${clockAt(PC.b)} · ${st}
+    <button id="pplay">⟲ play it</button><button id="pzoom">🔍 zoom to it</button><button id="pclose">✕</button>`;
+  if (el._h === html) return;
+  el._h = html; el.innerHTML = html; el.style.display = "block";
+  document.getElementById("pplay").onclick = () => { seek(PC.a - 2); v.play(); };
+  document.getElementById("pzoom").onclick = () => {
+    const [bx] = pieceBoxNear(frame); const b = bx || PC.boxes[0], k = v.clientWidth / D.width;
+    if (!bx) seek(PC.frames[0] / D.fps);
+    Z = 1; TX = TY = 0; zoomAt((b[0] + b[2]) / 2 * k, (b[1] + b[3]) / 2 * k, 3);
+    // after zooming at the box, move it to the middle of the view
+    TX += v.clientWidth / 2 - ((b[0] + b[2]) / 2 * k * Z + TX); TY += v.clientHeight / 2 - ((b[1] + b[3]) / 2 * k * Z + TY); applyZoom();
+  };
+  document.getElementById("pclose").onclick = () => { PC = null; el.style.display = "none"; el._h = ""; buildTimeline(); draw(); };
+}
 
 function boxesAt(f) {
   const a = D.frames[f]; const out = [];
@@ -209,26 +305,28 @@ function boxesAt(f) {
 function draw() {
   if (!D) return;
   const W = ov.width, s = W / D.width, t = frame / D.fps;
-  ctx.clearRect(0, 0, ov.width, ov.height);
-  const lw = Math.max(2, 2 * devicePixelRatio), fs = Math.round(13 * devicePixelRatio);
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, ov.width, ov.height);
+  const k = ov.width / (v.clientWidth || 1);  // canvas px per CSS px
+  ctx.setTransform(Z, 0, 0, Z, TX * k, TY * k);  // zoomed: positions follow the video, sizes are divided back
+  const u = unit() / Z, lw = 2 * u, fs = 13 * u;
   ctx.font = `600 ${fs}px system-ui`; ctx.lineJoin = "round";
   const alpha = i => focus === null || focus === i ? 1 : 0.25;
   const label = (txt, x, y, col, a) => {
-    ctx.globalAlpha = a; ctx.lineWidth = 4; ctx.strokeStyle = "rgba(0,0,0,.85)"; ctx.strokeText(txt, x, y);
+    ctx.globalAlpha = a; ctx.lineWidth = 2 * u; ctx.strokeStyle = "rgba(0,0,0,.85)"; ctx.strokeText(txt, x, y);
     ctx.fillStyle = col; ctx.fillText(txt, x, y); ctx.globalAlpha = 1;
   };
   if (layers.stations) for (const st of D.stations) {
     const [x1, y1, x2, y2] = st.box.map(v => v * s);
     ctx.strokeStyle = ST_COL[st.type] || "#fff"; ctx.lineWidth = lw; ctx.setLineDash([]);
-    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1); label(st.type.toUpperCase(), x1, y2 + fs + 2, ctx.strokeStyle, 1);
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1); label(st.type.toUpperCase(), x1, y2 + fs + u, ctx.strokeStyle, 1);
   }
   const now = boxesAt(frame), status = D.chickens.map(() => "away"), visible = new Set();
   const grp = (D.groups || {})[frame];
   if (layers.groups && grp) for (let k = 0; k < grp.length; k += 4) {
     const [x1, y1, x2, y2] = grp.slice(k, k + 4).map(v => v * s);
-    ctx.strokeStyle = "rgba(220,220,220,.8)"; ctx.lineWidth = lw; ctx.setLineDash([4 * devicePixelRatio, 4 * devicePixelRatio]);
+    ctx.strokeStyle = "rgba(220,220,220,.8)"; ctx.lineWidth = lw; ctx.setLineDash([4 * u, 4 * u]);
     ctx.strokeRect(x1, y1, x2 - x1, y2 - y1); ctx.setLineDash([]);
-    label("2+ chickens", x1, y2 + fs + 2, "#ddd", 0.9);
+    label("2+ chickens", x1, y2 + fs + u, "#ddd", 0.9);
   }
   if (layers.trails) {
     const back = Math.round(4 * D.fps), pts = D.chickens.map(() => []);
@@ -242,17 +340,30 @@ function draw() {
       ctx.stroke(); ctx.globalAlpha = 1;
     });
   }
+  if (PC) {
+    const [bx, kind] = pieceBoxNear(frame);
+    if (bx) {
+      const [x1, y1, x2, y2] = bx.map(q => q * s), g = 4 * u;
+      ctx.setLineDash(kind ? [5 * u, 4 * u] : []); ctx.globalAlpha = kind ? 0.7 : 1;
+      ctx.lineWidth = lw * 3; ctx.strokeStyle = "#000"; ctx.strokeRect(x1 - g, y1 - g, x2 - x1 + 2 * g, y2 - y1 + 2 * g);
+      ctx.lineWidth = lw * 1.6; ctx.strokeStyle = "#fff"; ctx.strokeRect(x1 - g, y1 - g, x2 - x1 + 2 * g, y2 - y1 + 2 * g);
+      ctx.setLineDash([]);
+      label(kind === 1 ? "▼ appears here soon" : kind === -1 ? "▼ was here" : kind === 2 ? "▼ the piece (hidden a moment)" : "▼ the picture's piece",
+            x1 - g, y1 - g - 4 * u - (layers.boxes ? fs + 4 * u : 0), "#fff", kind ? 0.8 : 1);
+      ctx.globalAlpha = 1;
+    }
+  }
   for (const o of now) {
     const c = D.chickens[o.c], [x1, y1, x2, y2] = o.b.map(v => v * s);
     visible.add(o.c); status[o.c] = o.st ? ACT[o.st] : "visible";
     if (!layers.boxes) continue;
     ctx.globalAlpha = alpha(o.c); ctx.strokeStyle = c.color; ctx.lineWidth = focus === o.c ? lw * 1.8 : lw; ctx.setLineDash([]);
     ctx.strokeRect(x1, y1, x2 - x1, y2 - y1); ctx.globalAlpha = 1;
-    label(c.name + (o.st ? ` (${ACT[o.st]})` : ""), x1, y1 - 5, c.color, alpha(o.c));
+    label(c.name + (o.st ? ` (${ACT[o.st]})` : ""), x1, y1 - 3 * u, c.color, alpha(o.c));
   }
   const sk = layers.skeletons && P && P.frames[frame];
   if (sk) {
-    const K = P.keypoints.length, n = 1 + 3 * K, r = 3 * devicePixelRatio;
+    const K = P.keypoints.length, n = 1 + 3 * K, r = 3 * u;
     for (let k = 0; k < sk.length; k += n) {
       const ci = sk[k], c = D.chickens[ci], pts = [];
       for (let j = 0; j < K; j++) pts.push([sk[k + 1 + 3 * j] * s, sk[k + 2 + 3 * j] * s, sk[k + 3 + 3 * j]]);
@@ -265,7 +376,7 @@ function draw() {
         if (!seen) return;
         ctx.beginPath(); ctx.arc(x, y, j === 0 ? r * 1.3 : r, 0, 7);
         ctx.fillStyle = j === 0 ? "#ff5252" : c.color; ctx.fill();   // beak in red: shows which way she faces
-        ctx.lineWidth = 1; ctx.strokeStyle = "#000"; ctx.stroke();
+        ctx.lineWidth = u / 2; ctx.strokeStyle = "#000"; ctx.stroke();
       });
       ctx.globalAlpha = 1;
     }
@@ -276,7 +387,7 @@ function draw() {
     for (let k = 0; k < pk.length; k += 3) {
       const c = D.chickens[pk[k]];
       ctx.globalAlpha = alpha(pk[k]) * (1 - back / 5); ctx.strokeStyle = "#fff"; ctx.lineWidth = lw;
-      ctx.beginPath(); ctx.arc(pk[k + 1] * s, pk[k + 2] * s, (4 + back * 3) * devicePixelRatio, 0, 7); ctx.stroke();
+      ctx.beginPath(); ctx.arc(pk[k + 1] * s, pk[k + 2] * s, (4 + back * 3) * u, 0, 7); ctx.stroke();
       ctx.strokeStyle = c.color; ctx.lineWidth = lw * 0.6; ctx.stroke(); ctx.globalAlpha = 1;
     }
   }
@@ -287,18 +398,20 @@ function draw() {
     if (!layers.hidden) continue;
     const [x1, y1, x2, y2] = h.box.map(v => v * s), c = D.chickens[h.c];
     ctx.globalAlpha = alpha(h.c) * (0.35 + 0.65 * conf); ctx.strokeStyle = c.color; ctx.lineWidth = lw;
-    ctx.setLineDash([6 * devicePixelRatio, 5 * devicePixelRatio]); ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    ctx.setLineDash([6 * u, 5 * u]); ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
     ctx.setLineDash([]); ctx.globalAlpha = 1;
-    label(`${c.name}? ${Math.round(conf * 100)}%`, x1, y1 - 5, c.color, alpha(h.c) * (0.35 + 0.65 * conf));
+    label(`${c.name}? ${Math.round(conf * 100)}%`, x1, y1 - 3 * u, c.color, alpha(h.c) * (0.35 + 0.65 * conf));
   }
-  if (layers.dots && DT) drawDots(s, lw, fs, alpha, label, status, visible);
+  if (layers.dots && DT) drawDots(s, lw, fs, alpha, label, status, visible, u);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  if (PC) pieceBanner(t);
   status.forEach((st, i) => { const el = document.getElementById("st" + i); if (el && el.textContent !== st) el.textContent = st; });
   document.getElementById("clock").textContent = clockAt(t);
   drawPlayhead();
 }
 
-function drawDots(s, lw, fs, alpha, label, status, visible) {
-  const r = 7 * devicePixelRatio;
+function drawDots(s, lw, fs, alpha, label, status, visible, u) {
+  const r = 7 * u;
   for (const hen of DT.hens) {
     const i = DT.ci[hen], d = DT.dots[hen];
     if (i === undefined || frame >= d.src.length) continue;
@@ -306,7 +419,7 @@ function drawDots(s, lw, fs, alpha, label, status, visible) {
     if (src === "-") continue;
     const x = d.x[frame] * s, y = d.y[frame] * s;
     if (src === "F") {   // followed by pixels: the last 3 s of its path, then a hollow dot
-      ctx.globalAlpha = alpha(i); ctx.strokeStyle = c.color; ctx.lineWidth = lw; ctx.setLineDash([3 * devicePixelRatio, 3 * devicePixelRatio]);
+      ctx.globalAlpha = alpha(i); ctx.strokeStyle = c.color; ctx.lineWidth = lw; ctx.setLineDash([3 * u, 3 * u]);
       ctx.beginPath(); let on = false;
       for (let f = Math.max(0, frame - Math.round(3 * DT.fps)); f <= frame; f++) {
         if (d.src[f] !== "F" && d.src[f] !== "S") { on = false; continue; }
@@ -315,7 +428,7 @@ function drawDots(s, lw, fs, alpha, label, status, visible) {
       ctx.stroke(); ctx.setLineDash([]);
       ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.lineWidth = lw * 2; ctx.strokeStyle = "#000"; ctx.stroke();
       ctx.lineWidth = lw * 1.2; ctx.strokeStyle = c.color; ctx.stroke(); ctx.globalAlpha = 1;
-      if (!visible.has(i)) { label(hen + " (followed)", x + r + 3, y + 4, c.color, alpha(i)); status[i] = "followed by pixels"; }
+      if (!visible.has(i)) { label(hen + " (followed)", x + r + 1.5 * u, y + 2 * u, c.color, alpha(i)); status[i] = "followed by pixels"; }
     } else if (src === "L" || src === "W") {   // not seen: waiting where last seen
       ctx.globalAlpha = alpha(i) * 0.45; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fillStyle = "#000"; ctx.fill();
       ctx.lineWidth = lw; ctx.strokeStyle = c.color; ctx.stroke();
@@ -334,9 +447,11 @@ function drawDots(s, lw, fs, alpha, label, status, visible) {
       const x = d.x[frame] * s, y = d.y[frame] * s;
       ctx.beginPath(); ctx.arc(x, y, r * 2.4, 0, 7); ctx.lineWidth = lw * 1.5; ctx.strokeStyle = "#ff3b3b"; ctx.stroke();
     }
-    const txt = "⚠ " + e.detail, yy = ov.height - (12 + k * 24) * devicePixelRatio;
-    ctx.fillStyle = "rgba(0,0,0,.72)"; ctx.fillRect(0, yy - fs - 4 * devicePixelRatio, ctx.measureText(txt).width + 20 * devicePixelRatio, fs + 10 * devicePixelRatio);
-    ctx.fillStyle = "#ff8a80"; ctx.fillText(txt, 10 * devicePixelRatio, yy);
+    // the reason stays fixed at the bottom of the screen, not zoomed with the video
+    const U = unit(), f2 = 13 * U, txt = "⚠ " + e.detail, yy = ov.height - (12 + k * 24) * U;
+    ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.font = `600 ${f2}px system-ui`;
+    ctx.fillStyle = "rgba(0,0,0,.72)"; ctx.fillRect(0, yy - f2 - 4 * U, ctx.measureText(txt).width + 20 * U, f2 + 10 * U);
+    ctx.fillStyle = "#ff8a80"; ctx.fillText(txt, 10 * U, yy); ctx.restore();
   });
 }
 
@@ -364,6 +479,7 @@ window.addEventListener("keydown", e => {
   else if (e.key === "ArrowLeft") seek(v.currentTime - 5);
   else if (e.key === ".") { v.pause(); seek(v.currentTime + fd); }
   else if (e.key === ",") { v.pause(); seek(v.currentTime - fd); }
+  else if (e.key === "0") { Z = 1; TX = TY = 0; applyZoom(); }
 });
 </script>
 </body>

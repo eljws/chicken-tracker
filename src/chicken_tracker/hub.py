@@ -9,6 +9,7 @@ clips under one address, plus progress, frame review and skeleton labelling.
     /run/<run>/clips/                  short clips of set-aside pieces, if made
     /metrics/                          per-hen charts for a day: distance, activity, runs
     /hens/                             every hen's pictures from all clips, grouped, to look her over
+    /timeline/                         all recordings as one video, dawn and dusk marked, day = dawn to dawn
 
 The pages are the same ones the single-purpose servers show: each request is handed to that
 page's own handler with the prefix taken off, so they work identically here and on their own.
@@ -298,6 +299,22 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
                 day = (parse_qs(query).get("day") or [days[-1] if days else ""])[0]
                 body = Mx.day_metrics(root, all_runs, day) if day else {}
                 return self._send(json.dumps({"days": days, **body}).encode(), "application/json")
+            if path == "/timeline":
+                return self._redirect(f"/timeline/{q}")
+            if path == "/timeline/":
+                return self._send((resources.files("chicken_tracker") / "static" / "timeline.html").read_bytes(),
+                                  "text/html; charset=utf-8")
+            if path == "/timeline/api":  # GET: the timeline + scan state; POST: scan the recordings again
+                from . import timeline as TL
+                if self.command == "POST":
+                    TL.scan_in_background(root)
+                return self._send(json.dumps({"timeline": TL.load(root), "scan": TL.scan_status()}).encode(), "application/json")
+            m = re.fullmatch(r"/timeline/video/(\d{4}-\d{2}-\d{2})/([\w\-]+\.mp4)", path)
+            if m:  # only recordings listed in the timeline are served
+                from . import timeline as TL
+                tl = TL.load(root) or {"clips": []}
+                c = next((c for c in tl["clips"] if c["rel"] == f"{m[1]}/{m[2]}"), None)
+                return self._file(Path(c["path"])) if c and Path(c["path"]).is_file() else self._send(b"not found", "text/plain", 404)
             if path == "/hens":
                 return self._redirect(f"/hens/{q}")
             if path == "/hens/":

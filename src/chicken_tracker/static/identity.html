@@ -11,9 +11,9 @@
   .tab { background: none; border: 0; color: #aaa; font-size: 15px; padding: 6px 10px; cursor: pointer;
          border-bottom: 2px solid transparent; }
   .tab.on { color: #fff; border-color: #4caf50; }
-  button.act { background: #2d2d2d; color: #eee; border: 1px solid #555; border-radius: 6px; padding: 6px 12px;
+  button.act, a.act { text-decoration: none; display: inline-block; background: #2d2d2d; color: #eee; border: 1px solid #555; border-radius: 6px; padding: 6px 12px;
                cursor: pointer; font-size: 14px; }
-  button.act:hover { background: #3a3a3a; }
+  button.act:hover, a.act:hover { background: #3a3a3a; }
   button.yes { background: #2e7d32; border-color: #4caf50; }
   button.no { background: #8e2b2b; border-color: #e57373; }
   .right { margin-left: auto; color: #999; }
@@ -90,6 +90,7 @@
                     background: color-mix(in srgb, var(--mc) 85%, transparent); border-radius: 0 0 4px 4px; white-space: nowrap; overflow: hidden; pointer-events: none; }
   .strip .np .chk { position: absolute; top: 1px; right: 1px; font-size: 11px; line-height: 1; padding: 2px 3px; border-radius: 4px;
                     background: #ffb74d; color: #000; pointer-events: none; }
+  .strip .np .bot { position: absolute; top: 1px; left: 1px; font-size: 12px; line-height: 1; pointer-events: none; }
   .strip .np.painted img { outline: 3px solid var(--mc); outline-offset: -3px; }
   .strip .np.painted.bpartial img { outline-style: dashed; } .strip .np.painted.bloose img { outline-style: dotted; }
   body.painting .strip img { cursor: crosshair; }
@@ -114,6 +115,7 @@
   <button class="act" id="resort" title="Re-sort unconfirmed pieces against your named chickens">↻ Re-sort pieces</button>
   <span class="right" id="status"></span>
 </header>
+<div id="irnote" style="display:none;margin:8px 16px 0;padding:6px 10px;border-radius:6px;background:#1f2333;border:1px solid #3c4466;color:#c5cae9;font-size:13px"></div>
 <main id="main"></main>
 <div id="panel"></div>
 <div id="toast"></div>
@@ -194,17 +196,37 @@ function render() {
   const unpl = (S.unplaced || []).length, todo = S.questions + S.conflicts + S.checks + unpl;
   $("#status").innerHTML = (todo ? `<b style="color:#ffb74d">${todo} to review${unpl ? ` (${unpl} not placed — see Name & merge)` : ""}</b> · ` : `<b style="color:#81c784">all reviewed ✓</b> · `) +
     `${S.chickens.length} chickens · ${unnamed} unnamed · ${S.answered} answers`;
+  const irn = $("#irnote"), ir = S.infrared || [];
+  irn.style.display = ir.length ? "block" : "none";
+  if (ir.length) irn.innerHTML = `🌙 Infrared (black-and-white) ${ir.map(([a, b]) => `${clockOf(a)}–${clockOf(b)}`).join(", ")} into this clip — out of scope (daytime only):
+    its ${S.infrared_pieces} pieces get no questions, checks or "?" marks, and stay out of training and the size calibration. Their names are left as they are.`;
   document.querySelectorAll(".tab").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
   tab === "name" ? renderName() : tab === "ask" ? renderAsk() : tab === "conflicts" ? renderConflicts() : renderChecks();
+}
+
+// Name & merge filter: everything, only what's left to do (not confirmed + not placed), or Claude's answers to spot-check
+let NF = localStorage.getItem("nameFilter") || "all";
+const nfKeep = f => NF === "all" || (NF === "left" ? !f.sure : !!f.claude);
+function nameFilterBar() {
+  const all = S.chickens.flatMap(c => c.fragments), aside = Object.values(S.aside).flat();
+  const left = all.filter(f => !f.sure).length + (S.unplaced || []).length;
+  const bot = all.filter(f => f.claude).length + aside.filter(f => f.claude).length;
+  const b = (k, txt, tip) => `<button class="act ${NF === k ? "on" : ""}" data-nf="${k}" title="${tip}" style="${NF === k ? "outline:2px solid #ffc107" : ""}">${txt}</button>`;
+  return `<div class="answers" style="margin:4px 0 10px;align-items:center"><span class="meta">Show</span>
+    ${b("all", "All pictures", "Every piece of every row")}
+    ${b("left", `Remaining <b>${left}</b>`, "Only pieces not confirmed yet (no green border) and pieces not placed in any row — what's left to do")}
+    ${bot ? b("bot", `🤖 Claude's <b>${bot}</b>`, "Only pieces answered by Claude from the pictures — to spot-check") : ""}
+    ${NF !== "all" ? `<span class="meta">${NF === "left" ? "rows with nothing left are hidden · set-aside piles hidden (they count as done)" : "rows without Claude's answers are hidden"}</span>` : ""}</div>`;
 }
 
 function renderName() {
   const opts = S.chickens.map(c => `<option value="${c.id}">${esc(label(c))}</option>`).join("");
   $("#main").innerHTML = namePalette() + `<div class="hint">Give each group its chicken's name. If two groups are the same bird,
     merge them. Click a picture that's in the wrong group to move it. Green border = confirmed by you,
-    dashed orange = only part of the bird, dotted blue = box a bit too big.
+    dashed orange = only part of the bird, dotted blue = box a bit too big, 🤖 = answered by Claude from the pictures (paint or click it to make it yours).
     ${S.to_check ? `<b style="color:#ffb74d">?</b> = worth a look (${S.to_check}): very short (under 2 s), or the recogniser unsure / naming another hen — hover for why. They're also in Questions.` : ""}</div>` +
-    S.chickens.map(c => `
+    nameFilterBar() +
+    S.chickens.filter(c => NF === "all" || c.fragments.some(nfKeep)).map(c => `
     <div class="card"><h3>
       <input data-id="${c.id}" class="${c.name ? "" : "unnamed"}" value="${esc(c.name)}" placeholder="Chicken ${c.id + 1} — type name">
       ${c.fragments.some(f => !f.sure) ? `<button class="act yes" data-all="${c.id}"
@@ -216,10 +238,12 @@ function renderName() {
       <span style="margin-left:auto" class="meta">same bird as</span>
       <select data-merge="${c.id}"><option value="">—</option>${opts.replace(`value="${c.id}"`, `value="${c.id}" disabled`)}</select>
     </h3>
-    <div class="strip" data-row="${c.id}">${c.fragments.map(f => `<span class="np" data-t="${f.track}"><img src="${img(f.crop)}" draggable="false" data-t="${f.track}" data-c="${c.id}"
+    <div class="strip" data-row="${c.id}">${c.fragments.filter(nfKeep).map(f => `<span class="np" data-t="${f.track}"><img src="${img(f.crop)}" draggable="false" data-t="${f.track}" data-c="${c.id}"
        class="${f.sure ? "sure" : ""} ${f.flag || ""} ${sel && sel.track === f.track ? "sel" : ""}"
-       title="piece #${f.track}${f.flag === "partial" ? " (only part of the bird)" : f.flag === "loose" ? " (box a bit too big)" : ""}${f.check ? " · worth a look: " + esc(f.check) : ""}">${f.check ? '<span class="chk">?</span>' : ""}<span class="tag"></span></span>`).join("")}</div>
-    </div>`).join("") + (S.unplaced && S.unplaced.length ? `
+       title="piece #${f.track}${f.flag === "partial" ? " (only part of the bird)" : f.flag === "loose" ? " (box a bit too big)" : ""}${f.check ? " · worth a look: " + esc(f.check) : ""}">${f.check ? '<span class="chk">?</span>' : ""}${f.claude ? '<span class="bot" title="answered by Claude from the pictures — check it">🤖</span>' : ""}<span class="tag"></span></span>`).join("")}</div>
+    </div>`).join("") + (NF === "left" && !S.chickens.some(c => c.fragments.some(nfKeep)) && !(S.unplaced || []).length
+      ? `<div class="card"><h3>Nothing left to do here 🎉</h3><div class="meta">Every piece is confirmed or set aside.</div></div>` : "") +
+    (S.unplaced && S.unplaced.length && NF !== "bot" ? `
     <div class="card" style="border-color:#ffb74d"><h3><span style="color:#ffb74d">Not placed — no hen fits</span>
       <span class="meta">${S.unplaced.length} piece${S.unplaced.length > 1 ? "s" : ""} in no row: when they were named automatically, every hen was
         already seen somewhere else at that moment. Often a second box on a hen, a shadow, or two hens in one box — paint or click to say what each is.</span>
@@ -228,13 +252,15 @@ function renderName() {
        class="${sel && sel.track === f.track ? "sel" : ""}" title="piece #${f.track} · not placed"><span class="tag"></span></span>`).join("")}</div></div>` : "") +
     [["multiple", "Set aside: several chickens in one box"],
                            ["not_chicken", "Set aside: not a chicken"],
-                           ["unsure", "Set aside: a hen, can't tell which"]].map(([k, title]) => `
+                           ["unsure", "Set aside: a hen, can't tell which"]].filter(([k]) => NF === "all" || (NF === "bot" && S.aside[k].some(f => f.claude))).map(([k, title]) => `
     <div class="card" style="opacity:.85"><h3><span>${title}</span>
       <span class="meta">${S.aside[k].length} pieces · not counted for any chicken · click to put one back</span>
       ${NB.brush && S.aside[k].length ? `<button class="act rowact" data-prow="${k}" title="Paint every picture in this row with the brush">🖌 paint whole row</button>` : ""}</h3>
-    <div class="strip" data-row="${k}">${S.aside[k].map(f => `<span class="np" data-t="${f.track}"><img src="${img(f.crop)}" draggable="false" data-t="${f.track}" data-aside="${k}"
-       class="${sel && sel.track === f.track ? "sel" : ""}" title="piece #${f.track}"><span class="tag"></span></span>`).join("") ||
+    <div class="strip" data-row="${k}">${S.aside[k].filter(f => NF !== "bot" || f.claude).map(f => `<span class="np" data-t="${f.track}"><img src="${img(f.crop)}" draggable="false" data-t="${f.track}" data-aside="${k}"
+       class="${sel && sel.track === f.track ? "sel" : ""}" title="piece #${f.track}${f.claude ? " · answered by Claude" : ""}">${f.claude ? '<span class="bot">🤖</span>' : ""}<span class="tag"></span></span>`).join("") ||
        '<span class="meta">none yet</span>'}</div></div>`).join("");
+  document.querySelectorAll("button[data-nf]").forEach(b => b.onclick = () => {
+    NF = b.dataset.nf; localStorage.setItem("nameFilter", NF); renderName(); });
   document.querySelectorAll(".card input").forEach(i => {
     i.addEventListener("change", () => api("api/name", { chicken: +i.dataset.id, name: i.value }));
     i.addEventListener("keydown", e => { if (e.key === "Enter") i.blur(); });
@@ -593,6 +619,28 @@ async function playPiece(track, dir = "") {
   finally { $("#play") && ($("#play").innerHTML = "▶ Play this piece <kbd>V</kbd>"); }
 }
 
+// the clip's player at a stretch of a piece: it points the piece out (white box, banner, timeline band)
+const footLink = (track, f0, f1, name) => `../player/#t=${(f0 / S.fps).toFixed(2)}&piece=${track}&a=${(f0 / S.fps).toFixed(2)}` +
+  `&b=${(f1 / S.fps).toFixed(2)}${name ? `&name=${encodeURIComponent(name)}` : ""}`;
+
+// a checks stretch as a short video (2 s either side), made on the server; click again to pause
+async function playStretch(c) {
+  const box = $("#kclipbox"), v = $("#kclipv"), b = $("#kplay");
+  if (!box || !v) return;
+  if (box.style.display !== "none" && v.dataset.k === c.key) { v.paused ? v.play() : v.pause(); return; }
+  const label = b.innerHTML; b.textContent = "⏳ making the video…";
+  try {
+    const r = await fetch(`clip/${c.track}.mp4?v=${S.version}&from=${c.from_frame}&to=${c.to_frame}`);
+    if (!r.ok) throw new Error();
+    if (v.src) URL.revokeObjectURL(v.src);
+    v.src = URL.createObjectURL(await r.blob()); v.dataset.k = c.key;
+    box.style.display = "block"; v.play();
+    document.querySelectorAll(".kspd").forEach(x => x.onclick = () => { v.playbackRate = +x.dataset.r;
+      document.querySelectorAll(".kspd").forEach(y => y.classList.toggle("on", y === x)); });
+  } catch { toast("Couldn't make the video", 5000); }
+  finally { b.innerHTML = label; }
+}
+
 function renderAsk() {
   $("#panel").style.display = "none";
   const q = S.next;
@@ -805,6 +853,7 @@ window.addEventListener("keydown", e => {
   const z = $("#zoom"); if (z && z.style.display === "flex") return;
   if (e.key === "Escape") { CP.bird = CP.box = null; return render(); }
   if (e.key === "Enter") { e.preventDefault(); return CP.apply && CP.apply(); }
+  if (tab === "checks" && e.key.toLowerCase() === "v" && window._playCheck) return window._playCheck();
   const i = "123456789".indexOf(e.key);
   if (i >= 0 && S.chickens[i]) { const k = `c${S.chickens[i].id}`; CP.bird = CP.bird === k ? null : k; render(); }
 });
@@ -837,6 +886,15 @@ async function renderChecks() {
         <button class="act" id="kok" title="Counts as your answer: this piece is confirmed as it is now (one undo step)">✓ Looks fine — it's ${esc(owner ? label(owner) : asideName || "right")}</button>
         <button class="act" id="kskip">Skip for now</button>
       </div>
+      <div class="answers" style="margin-top:0">
+        <button class="act" id="kplay" title="A short video of just this stretch, 2 s either side; her box yellow, other birds grey">▶ Play the stretch ${clockOf(c.from_frame / S.fps)}–${clockOf(c.to_frame / S.fps)} <kbd>V</kbd></button>
+        <a class="act" href="${footLink(c.track, c.from_frame, c.to_frame, owner ? label(owner) : asideName || "")}" target="_blank"
+           title="The whole footage in the player, 2 s before the stretch; the piece gets a white box">🎬 Open the footage at ${clockOf(Math.max(0, c.from_frame / S.fps - 2))} ↗</a></div>
+      <div id="kclipbox" style="display:none;margin:6px 0 10px">
+        <video id="kclipv" controls loop muted playsinline style="max-width:100%;border-radius:6px;background:#000"></video>
+        <div class="answers" style="margin-top:4px"><span class="meta">speed</span>
+          ${[0.25, 0.5, 1, 2, 4].map(r => `<button class="act kspd" data-r="${r}">${r}×</button>`).join("")}
+          <span class="meta">her box is yellow, other birds grey</span></div></div>
       <div class="meta" style="margin:10px 0 4px">…or say yourself what it is: pick a <b>Bird</b> and/or a <b>Box</b> brush (both can go on the
         same pictures, e.g. Monster + ◑ box too big), paint the pictures, then Apply. The piece is cut where your paint changes;
         unpainted pictures stay as they were (now: ${esc(owner ? label(owner) : asideName || "—")}).</div>
@@ -851,7 +909,8 @@ async function renderChecks() {
     <div class="card"><h3>All checks <span class="meta">(${S.checks}, biggest first — click to open)</span></h3>
       ${S.check_list.map(x => `<div class="moment" data-k="${esc(x.key)}" style="display:flex;gap:10px;padding:5px;cursor:pointer;
         border-radius:6px;${x.key === c.key ? "background:#2a2a2a" : ""}"><span class="meta" style="width:60px">${x.seconds}s</span>
-        <span>${esc(x.title)}</span></div>`).join("")}</div>`;
+        <span style="flex:1">${esc(x.title)}</span>${x.from_frame != null ? `<a class="meta kfoot" href="${footLink(x.track, x.from_frame, x.to_frame, "")}"
+        target="_blank" title="Open the footage here (new tab)" style="white-space:nowrap">🎬 ${clockOf(x.from_frame / S.fps)} ↗</a>` : ""}</div>`).join("")}</div>`;
   $("#kapply").onclick = async () => { toast("Applying… (cutting, new pictures)"); selCheck = null;
     await api("api/apply_check", { key: c.key }); toast("Fixed ✓"); };
   $("#kok").onclick = () => { selCheck = null; api("api/dismiss_check", { key: c.key }); };
@@ -859,7 +918,9 @@ async function renderChecks() {
     await api("api/apply_check", { key: c.key, variant: c.alt.variant }); toast("Fixed ✓"); };
   $("#kskip").onclick = () => { const i = S.check_list.findIndex(x => x.key === c.key);
     selCheck = (S.check_list[i + 1] || S.check_list[0]).key; renderChecks(); };
-  document.querySelectorAll(".moment[data-k]").forEach(el => el.onclick = () => { selCheck = el.dataset.k; renderChecks(); });
+  document.querySelectorAll(".moment[data-k]").forEach(el => el.onclick = e => { if (e.target.closest(".kfoot")) return; selCheck = el.dataset.k; renderChecks(); });
+  window._playCheck = () => playStretch(c);
+  $("#kplay").onclick = window._playCheck;
   bindConflictPaint({ a: c.track, b: "check:" + c.key, chicken: owner ? owner.id : null, base: "keep", single: true });
 }
 

@@ -8,7 +8,7 @@ Learned from your confirmed pieces across every clip (one fixed camera, one grou
   of ground covers at each spot; boxes shrink as that shrinks (b near 2 = plain perspective).
 * hen size: each hen's own factor against the average hen (Monster's box ~1.3x, Ginger's ~0.8x).
 
-Only clean boxes count: confirmed, not flagged partial/loose, no other box overlapping, not
+Only clean daytime boxes count: confirmed, not in infrared, not flagged partial/loose, no other box overlapping, not
 cut off by the picture edge. Saved as <output>/size_calibration.json; the naming page's checks
 then judge a named hen's box against *her* usual size at that spot, and set-aside pieces
 against the average hen.
@@ -66,7 +66,7 @@ def clean_boxes(run: Path) -> pd.DataFrame:
     if H is None:
         return pd.DataFrame()
     det = I.load_detections(run, d)
-    sure, bad = I.confirmed(d), I.partial(d) | I.excluded(d)
+    sure, bad = I.confirmed_by_you(d), I.partial(d) | I.excluded(d)  # your answers only, not Claude's
     lab = {t: c["name"] for c in d["chickens"] if c["name"] for t in c["tracks"] if t in sure and t not in bad}
     det = det.assign(crowd=_crowding(det))
     det = det[det.track_id.isin(lab) & (det.crowd == 0) & (det.frame % EVERY_N == 0)]
@@ -78,6 +78,10 @@ def clean_boxes(run: Path) -> pd.DataFrame:
             except ValueError:
                 continue
             det = det[~((det.track_id == tt) & (det.frame >= f0) & (det.frame <= f1))]
+    from . import daylight as DL
+    ir = DL.infrared_s(run)  # infrared boxes are out of scope (and the picture differs): left out
+    if ir:
+        det = det[~DL.in_infrared(det.frame.to_numpy(), d["fps"], ir)]
     det = det[(det.x1 > EDGE_PX) & (det.y1 > EDGE_PX) & (det.x2 < W - EDGE_PX) & (det.y2 < Hh - EDGE_PX)]
     u, v = ((det.x1 + det.x2) / 2).to_numpy(), det.y2.to_numpy()
     return pd.DataFrame({"hen": det.track_id.map(lab).to_numpy(), "area": ((det.x2 - det.x1) * (det.y2 - det.y1)).to_numpy(),

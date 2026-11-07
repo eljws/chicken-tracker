@@ -244,6 +244,18 @@ def cmd_dashboard(a: argparse.Namespace) -> None:
           public_port=a.public_port)
 
 
+def cmd_timeline(a: argparse.Namespace) -> None:
+    from . import timeline as TL
+
+    roots = [Path(r) for r in a.downloads] or None
+    tl = TL.build(a.out, roots, progress=lambda i, n, name: print(f"\r{i}/{n} {name}", end="", flush=True))
+    print(f"\n{len(tl['clips'])} recordings -> {a.out / TL.FILE}")
+    for m in tl["markers"]:
+        print(f"  {'☀ dawn' if m['kind'] == 'dawn' else '🌙 dusk'}  {m['at'].replace('T', ' ')}")
+    for d in tl["days"]:
+        print(f"  day {d['day']}: {d['from'].replace('T', ' ')} -> {d['to'].replace('T', ' ')}{'' if d['complete'] else '  (part)'}")
+
+
 def cmd_sizes(a: argparse.Namespace) -> None:
     from . import dashboard as D, sizes
 
@@ -480,6 +492,13 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("--device", help="for click-to-outline on the labelling page: cpu, mps, 0, ...")
         p.add_argument("--no-browser", action="store_true")
         p.set_defaults(func=cmd_dashboard)
+
+    p = sub.add_parser("timeline", help="line up all recordings and find dawn/dusk (camera's infrared switch); "
+                                        "a day = dawn to dawn. Saved as <out>/timeline.json, shown at /timeline/")
+    p.add_argument("-o", "--out", type=Path, default=Path("output"))
+    p.add_argument("--downloads", action="append", default=[],
+                   help="device folder(s) with <date>/HHMMSS-HHMMSS_chNN.mp4 (default: where processed clips came from)")
+    p.set_defaults(func=cmd_timeline)
 
     p = sub.add_parser("sizes", help="learn each hen's usual box size and how it shrinks with distance "
                                      "(from your confirmed naming; used by the naming checks)")

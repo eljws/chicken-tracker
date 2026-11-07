@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Timeline · Chicken tracker</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg: #121212; --panel: #1c1c1c; --line: #2e2e2e; --text: #eaeaea; --muted: #9a9a9a;
+          --day: #4a4426; --night: #1d2340; --dawn: #ffd54f; --dusk: #9fa8da; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif;
+         height: 100vh; display: grid; grid-template-rows: auto 1fr auto; }
+  header { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: var(--panel);
+           border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  #clock { font-variant-numeric: tabular-nums; font-size: 20px; margin-left: auto; }
+  #phase { padding: 2px 8px; border-radius: 4px; font-size: 13px; }
+  #phase.day { background: var(--day); color: var(--dawn); } #phase.night { background: var(--night); color: var(--dusk); }
+  button, select { background: #2a2a2a; color: var(--text); border: 1px solid #444; border-radius: 6px; padding: 4px 10px;
+                   cursor: pointer; font-size: 13px; }
+  button:hover { background: #363636; } button.on { background: #3b5bdb; border-color: #3b5bdb; }
+  #stage { position: relative; background: #000; min-height: 0; display: flex; align-items: center; justify-content: center; }
+  #stage video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  #stage video.hidden { visibility: hidden; }
+  #msg { position: absolute; color: var(--muted); }
+  #gapnote { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,.75);
+             padding: 4px 12px; border-radius: 6px; display: none; }
+  footer { background: var(--panel); border-top: 1px solid var(--line); padding: 8px 14px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .muted { color: var(--muted); font-size: 12px; }
+  kbd { background: #333; border: 1px solid #555; border-radius: 3px; padding: 0 4px; font-size: 11px; }
+  #bar { position: relative; height: 64px; margin: 8px 0 4px; cursor: pointer; user-select: none; }
+  #bar canvas { width: 100%; height: 100%; display: block; }
+  #tip { position: absolute; top: -26px; background: #000; border: 1px solid #555; border-radius: 4px; padding: 1px 6px;
+         font-size: 12px; pointer-events: none; white-space: nowrap; display: none; transform: translateX(-50%); }
+  #info a { color: #90caf9; }
+  .mk { font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎞 Timeline</h1>
+  <button id="dprev" title="Previous day">◀</button>
+  <select id="day"></select>
+  <button id="dnext" title="Next day">▶</button>
+  <span class="muted" id="dayinfo"></span>
+  <span id="phase"></span>
+  <span id="clock">--:--:--</span>
+</header>
+<div id="stage">
+  <span id="msg">Loading…</span>
+  <video id="va" muted playsinline preload="auto"></video>
+  <video id="vb" class="hidden" muted playsinline preload="auto"></video>
+  <div id="gapnote"></div>
+</div>
+<footer>
+  <div class="row">
+    <button id="play">▶ Play</button>
+    <span id="speeds"></span>
+    <button id="pmark" title="Previous marker ( [ )">⏮ marker</button>
+    <button id="nmark" title="Next marker ( ] )">marker ⏭</button>
+    <span class="mk" id="marks"></span>
+    <span class="muted" style="margin-left:auto"><kbd>space</kbd> play · <kbd>←</kbd><kbd>→</kbd> 10 s · <kbd>shift</kbd>+<kbd>←</kbd><kbd>→</kbd> 5 min ·
+      <kbd>[</kbd><kbd>]</kbd> markers</span>
+  </div>
+  <div id="bar"><canvas id="cv"></canvas><div id="tip"></div></div>
+  <div class="row muted" id="info"></div>
+  <div class="row muted" style="margin-top:4px">
+    <span>☀ dawn = the camera switches from infrared to colour · 🌙 dusk = colour to infrared · a day runs from one dawn to the next ·
+      shaded: <span style="color:var(--dawn)">■ colour</span> <span style="color:var(--dusk)">■ infrared</span> · green line = processed clip · hatched = no recording</span>
+    <span style="margin-left:auto"><button id="rescan" title="Look for new recordings and find the switches again (new files only; a few seconds each)">↻ Rescan recordings</button>
+      <span id="scan"></span></span>
+  </div>
+</footer>
+<script>
+const $ = s => document.querySelector(s);
+const ms = iso => Date.parse(iso);  // ISO without zone = the camera's local clock, read back the same way
+const pad = n => String(n).padStart(2, "0");
+const hms = t => { const d = new Date(t); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+const hm = t => { const d = new Date(t); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const dayName = iso => new Date(iso + "T12:00:00").toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+let TL = null, DAY = null, clips = [], cur = null, wall = 0, rate = 1;
+const vids = [$("#va"), $("#vb")];
+let act = 0;  // index of the visible video
+const V = () => vids[act], W = () => vids[1 - act];
+
+async function load(keep) {
+  const j = await (await fetch("api")).json();
+  showScan(j.scan);
+  TL = j.timeline;
+  if (!TL || !TL.days.length) { $("#msg").textContent = "No timeline yet — press ↻ Rescan recordings."; return; }
+  TL.clips.forEach(c => { c.s = ms(c.start); c.e = ms(c.end); });
+  const sel = $("#day");
+  sel.innerHTML = TL.days.map((d, i) => `<option value="${i}">${dayName(d.day)}${d.complete ? "" : " (part)"}</option>`).join("");
+  const h = new URLSearchParams(location.hash.slice(1));
+  let di = TL.days.findIndex(d => d.day === h.get("day"));
+  if (keep && DAY) di = TL.days.findIndex(d => d.day === DAY.day);
+  if (di < 0) di = TL.days.findIndex(d => d.complete) >= 0 ? TL.days.findIndex(d => d.complete) : TL.days.length - 1;
+  const at = h.get("t") ? ms(h.get("t")) : null;
+  pickDay(di, keep ? wall : at);
+}
+
+function pickDay(i, at) {
+  DAY = TL.days[i]; $("#day").value = i;
+  DAY.s = ms(DAY.from); DAY.e = ms(DAY.to);
+  clips = TL.clips.filter(c => c.e > DAY.s && c.s < DAY.e);
+  const mk = TL.markers.filter(m => ms(m.at) >= DAY.s && ms(m.at) <= DAY.e);
+  $("#dayinfo").textContent = `${hm(DAY.s)} → ${hm(DAY.e)}${DAY.complete ? "" : " · incomplete (recordings missing at an end)"} · ${clips.length} files`;
+  $("#marks").innerHTML = mk.map(m => `<button data-at="${m.at}">${m.kind === "dawn" ? "☀ dawn" : "🌙 dusk"} ${hms(ms(m.at))}</button>`).join(" ");
+  document.querySelectorAll("#marks button").forEach(b => b.onclick = () => seekWall(ms(b.dataset.at)));
+  drawBar();
+  seekWall(at && at >= DAY.s && at < DAY.e ? at : (DAY.dawn ? ms(DAY.dawn) : DAY.s));
+}
+$("#day").onchange = e => pickDay(+e.target.value);
+$("#dprev").onclick = () => +$("#day").value > 0 && pickDay(+$("#day").value - 1);
+$("#dnext").onclick = () => +$("#day").value < TL.days.length - 1 && pickDay(+$("#day").value + 1);
+
+// ------------------------------------------------------------- playing file after file
+const clipAt = t => clips.find(c => t >= c.s && t < c.e) || null;
+const nextClip = c => clips[clips.indexOf(c) + 1] || null;
+const src = c => "video/" + c.rel;
+
+function seekWall(t) {
+  let c = clipAt(t);
+  if (!c) {  // no recording here: the next file that starts after it
+    c = clips.find(x => x.s > t);
+    if (!c) return;
+    t = c.s;
+  }
+  openClip(c, (t - c.s) / 1000);
+}
+function openClip(c, off) {  // show file c from off seconds (files may overlap by a moment: always this one)
+  if (cur === c) { V().currentTime = off; return; }
+  const wasPlaying = !V().paused;
+  const w = W();
+  const go = () => {
+    w.currentTime = off;
+    w.playbackRate = rate;
+    swap(c);
+    if (wasPlaying || playing) w.play().catch(() => {});
+  };
+  if (w.dataset.rel === c.rel && w.readyState >= 1) go();
+  else { w.dataset.rel = c.rel; w.src = src(c); w.addEventListener("loadedmetadata", go, { once: true }); }
+  $("#msg").textContent = "Loading…";
+}
+function swap(c) {
+  const old = V();
+  act = 1 - act; cur = c;
+  V().classList.remove("hidden"); old.classList.add("hidden"); old.pause();
+  $("#msg").textContent = "";
+  info();
+}
+let playing = false;
+function tick() {
+  if (cur) {
+    const v = V();
+    wall = cur.s + v.currentTime * 1000;
+    $("#clock").textContent = hms(wall);
+    const ph = phaseAt(wall);
+    $("#phase").className = ph || ""; $("#phase").textContent = ph === "day" ? "☀ colour" : ph === "night" ? "🌙 infrared" : "";
+    // get the next file ready a minute early, then switch at the end
+    const n = nextClip(cur);
+    if (n && cur.e - wall < 60000 && W().dataset.rel !== n.rel) { W().dataset.rel = n.rel; W().src = src(n); W().preload = "auto"; }
+    // end of a file: "ended", or (these recordings' picture stops a moment before the file's stated
+    // length) within a second of the end and no longer moving
+    const stuck = v.currentTime === tick.lastT && Date.now() - (tick.since || 0) > 400;
+    if (v.currentTime !== tick.lastT) { tick.lastT = v.currentTime; tick.since = Date.now(); }
+    const atEnd = v.ended || v.currentTime >= v.duration - 0.08 || (v.duration - v.currentTime < 1.0 && stuck);
+    if (n && playing && atEnd) {
+      const gap = n.s - cur.e;
+      if (gap > 2000) { $("#gapnote").style.display = "block"; $("#gapnote").textContent = `No recording ${hms(cur.e)}–${hms(n.s)}: skipped`;
+        setTimeout(() => $("#gapnote").style.display = "none", 3000); }
+      openClip(n, Math.max(0, (cur.e - n.s) / 1000));
+    } else if (!n && atEnd && playing) setPlaying(false);
+    if (wall >= DAY.e && playing) setPlaying(false);
+    drawHead();
+    if (!tick.h || Date.now() - tick.h > 1000) { tick.h = Date.now(); history.replaceState(null, "", `#day=${DAY.day}&t=${new Date(wall - new Date(wall).getTimezoneOffset() * 60000).toISOString().slice(0, 19)}`); }
+  }
+}
+setInterval(tick, 100);  // a timer, not animation frames: keeps switching files when the tab is in the background
+function setPlaying(p) {
+  playing = p; $("#play").textContent = p ? "❚❚ Pause" : "▶ Play";
+  if (p) V().play().catch(() => {}); else V().pause();
+}
+$("#play").onclick = () => setPlaying(!playing);
+const RATES = [0.5, 1, 2, 4, 8, 16];
+$("#speeds").innerHTML = RATES.map(r => `<button data-r="${r}" class="${r === 1 ? "on" : ""}">${r}×</button>`).join(" ");
+document.querySelectorAll("#speeds button").forEach(b => b.onclick = () => {
+  rate = +b.dataset.r; vids.forEach(v => v.playbackRate = rate);
+  document.querySelectorAll("#speeds button").forEach(x => x.classList.toggle("on", x === b));
+});
+const phaseAt = t => { const p = TL.phases.find(([a, b]) => t >= ms(a) && t < ms(b)); return p ? p[2] : null; };
+function jumpMarker(dir) {
+  const ts = TL.markers.map(m => ms(m.at)).filter(t => t >= DAY.s && t <= DAY.e);
+  const t = dir > 0 ? ts.find(t => t > wall + 1000) : [...ts].reverse().find(t => t < wall - 1000);
+  if (t != null) seekWall(t);
+}
+$("#pmark").onclick = () => jumpMarker(-1); $("#nmark").onclick = () => jumpMarker(1);
+window.addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT") return;
+  if (e.key === " ") { e.preventDefault(); setPlaying(!playing); }
+  else if (e.key === "ArrowRight") seekWall(wall + (e.shiftKey ? 300000 : 10000));
+  else if (e.key === "ArrowLeft") seekWall(Math.max(DAY.s, wall - (e.shiftKey ? 300000 : 10000)));
+  else if (e.key === "]") jumpMarker(1); else if (e.key === "[") jumpMarker(-1);
+});
+
+function info() {
+  const c = cur, off = Math.max(0, (wall - c.s) / 1000);
+  const run = c.run ? ` · processed: <a href="../run/${c.run}/player/#t=${off.toFixed(1)}" target="_blank">player at this moment ↗</a> ·
+    <a href="../run/${c.run}/naming/" target="_blank">naming ↗</a>` : " · not processed";
+  $("#info").innerHTML = `file <b>${c.rel}</b> (${hms(c.s)}–${hms(c.e)})${run}`;
+}
+setInterval(() => cur && info(), 2000);
+
+// ------------------------------------------------------------- the day bar
+const cv = $("#cv"), cx = cv.getContext("2d");
+let barBase = null;
+const xOf = t => (t - DAY.s) / (DAY.e - DAY.s) * cv.width;
+function drawBar() {
+  const r = devicePixelRatio, W_ = cv.clientWidth * r, H = cv.clientHeight * r;
+  cv.width = W_; cv.height = H;
+  cx.fillStyle = "#151515"; cx.fillRect(0, 0, W_, H);
+  const top = 18 * r, h = H - top - 10 * r;
+  // no recording: hatched
+  cx.strokeStyle = "#5a2a2a"; cx.lineWidth = r;
+  for (let x = -H; x < W_; x += 6 * r) { cx.beginPath(); cx.moveTo(x, top + h); cx.lineTo(x + h, top); cx.stroke(); }
+  for (const c of clips) {  // recordings, shaded by colour / infrared
+    for (const [a, b, p] of TL.phases) {
+      const s = Math.max(c.s, ms(a), DAY.s), e = Math.min(c.e, ms(b), DAY.e);
+      if (e <= s) continue;
+      cx.fillStyle = p === "day" ? "#6b6230" : "#2a3466";
+      cx.fillRect(xOf(s), top, Math.max(1, xOf(e) - xOf(s)), h);
+    }
+    cx.fillStyle = "rgba(0,0,0,.6)"; cx.fillRect(xOf(c.s), top, Math.max(1, r), h);  // file boundary
+    if (c.run) { cx.fillStyle = "#66bb6a"; cx.fillRect(xOf(Math.max(c.s, DAY.s)), top + h + 2 * r, xOf(Math.min(c.e, DAY.e)) - xOf(Math.max(c.s, DAY.s)), 3 * r); }
+  }
+  // hour ticks
+  cx.fillStyle = "#888"; cx.font = `${10 * r}px system-ui`; cx.textAlign = "center";
+  const h0 = new Date(DAY.s); h0.setMinutes(0, 0, 0);
+  for (let t = h0.getTime() + 3600000; t < DAY.e; t += 3600000) {
+    const x = xOf(t); cx.fillRect(x, top - 3 * r, r, 3 * r);
+    if (new Date(t).getHours() % 2 === 0) cx.fillText(hm(t), x, top - 5 * r);
+  }
+  // markers
+  for (const m of TL.markers) {
+    const t = ms(m.at); if (t < DAY.s || t > DAY.e) continue;
+    const x = xOf(t);
+    cx.fillStyle = m.kind === "dawn" ? "#ffd54f" : "#9fa8da";
+    cx.fillRect(x - r, top - 2 * r, 2 * r, h + 4 * r);
+    cx.textAlign = x < 40 * r ? "left" : "center";
+    cx.font = `600 ${11 * r}px system-ui`;
+    cx.fillText(`${m.kind === "dawn" ? "☀" : "🌙"} ${hm(t)}`, Math.max(2 * r, x), top + h / 2 + 4 * r);
+  }
+  barBase = cx.getImageData(0, 0, W_, H);
+}
+function drawHead() {
+  if (!barBase || !DAY) return;
+  cx.putImageData(barBase, 0, 0);
+  const x = xOf(wall); cx.fillStyle = "#fff"; cx.fillRect(x - devicePixelRatio, 0, 2 * devicePixelRatio, cv.height);
+}
+window.addEventListener("resize", () => DAY && drawBar());
+const bar = $("#bar"), tip = $("#tip");
+const tAt = e => { const r = bar.getBoundingClientRect(); return DAY.s + (e.clientX - r.left) / r.width * (DAY.e - DAY.s); };
+bar.onclick = e => seekWall(tAt(e));
+bar.onmousemove = e => {
+  const t = tAt(e), c = clipAt(t), r = bar.getBoundingClientRect();
+  tip.style.display = "block"; tip.style.left = (e.clientX - r.left) + "px";
+  tip.textContent = `${hms(t)} · ${c ? (phaseAt(t) === "night" ? "🌙 infrared" : "☀ colour") + (c.run ? " · processed" : "") : "no recording"}`;
+};
+bar.onmouseleave = () => tip.style.display = "none";
+
+// ------------------------------------------------------------- rescanning
+function showScan(s) {
+  $("#scan").className = "muted";
+  $("#scan").textContent = s.running ? `scanning ${s.done}/${s.total || "…"}` : s.error ? `scan failed: ${s.error}` :
+    TL ? `scanned ${new Date(TL.built * 1000).toLocaleString()}` : "";
+}
+$("#rescan").onclick = async () => {
+  const j = await (await fetch("api", { method: "POST" })).json(); showScan(j.scan);
+  const poll = setInterval(async () => {
+    const k = await (await fetch("api")).json(); showScan(k.scan);
+    if (!k.scan.running) { clearInterval(poll); load(true); }
+  }, 1500);
+};
+vids.forEach(v => v.addEventListener("error", () => { if (v === V()) $("#msg").textContent = "Couldn't load this recording."; }));
+load();
+</script>
+</body>
+</html>
