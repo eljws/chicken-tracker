@@ -307,3 +307,93 @@ def clip_phases(tl: dict, name: str) -> list[tuple[float, float, str]]:
         cur, at = sw["to"], sw["t"]
     out.append((at, c["duration_s"], cur))
     return out
+
+
+# ------------------------------------------------------------------ hens across a day
+HENS_FILE = "timeline_hens.json"
+_HEN_SRC = ("chicken_timeline.csv", "fast_moments.csv", "pecks.csv", "dots.json", "meta.json")
+
+
+def _merge(iv: list[list[float]], gap: float = 1.0) -> list[list[float]]:
+    out = []
+    for a, b in sorted(iv):
+        if out and a - out[-1][1] <= gap:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [[round(a, 2), round(b, 2)] for a, b in out]
+
+
+def clip_hens(run: Path) -> dict | None:
+    """One processed clip, compact: when each hen is seen / hidden (seconds into the clip), her fast
+    runs, illegal moves and pecks per 10 s. Cached in <run>/timeline_hens.json."""
+    import pandas as pd
+    from .player import _color
+    run = Path(run)
+    if not (run / "chicken_timeline.csv").exists():
+        return None
+    key = [round((run / f).stat().st_mtime, 2) if (run / f).exists() else 0 for f in _HEN_SRC]
+    cf = run / HENS_FILE
+    if cf.exists():
+        try:
+            d = json.loads(cf.read_text())
+            if d.get("key") == key:
+                return d
+        except ValueError:
+            pass
+    meta = json.loads((run / "meta.json").read_text())["video"]
+    tl = pd.read_csv(run / "chicken_timeline.csv")
+    hens = {}
+    for name, g in tl.groupby("chicken"):
+        hens[str(name)] = {"color": _color(str(name)),
+                           "seen": _merge(g[g.state == "visible"][["start_s", "end_s"]].values.tolist()),
+                           "hidden": _merge(g[g.state == "hidden"][["start_s", "end_s"]].values.tolist())}
+    events = []
+    if (run / "fast_moments.csv").exists():
+        for _, r in pd.read_csv(run / "fast_moments.csv").iterrows():
+            events.append({"kind": "run", "hen": r.chicken, "t": round(float(r.at_s), 2),
+                           "detail": f"{r.chicken} runs {r.speed_m_s:.1f} m/s"})
+    if (run / "dots.json").exists():
+        try:
+            for e in json.loads((run / "dots.json").read_text()).get("illegal", []):
+                events.append({"kind": "illegal", "hen": e["hen"], "t": round(e["from_frame"] / meta["fps"], 2),
+                               "detail": e.get("detail", "")})
+        except (ValueError, KeyError):
+            pass
+    pecks = {}
+    if (run / "pecks.csv").exists():
+        pk = pd.read_csv(run / "pecks.csv")
+        for name, g in pk.groupby("chicken"):
+            b = (g.time_s // 10 * 10).value_counts().sort_index()
+            pecks[str(name)] = [[float(t), int(n)] for t, n in b.items()]
+    d = {"key": key, "fps": meta["fps"], "video": Path(meta["path"]).name, "hens": hens, "events": events, "pecks": pecks}
+    cf.write_text(json.dumps(d))
+    return d
+
+
+def day_hens(root: Path, day: str) -> dict:
+    """Every processed clip of a dawn-to-dawn day with its hens, for the Timeline page."""
+    from .metrics import HENS
+    from .player import _color
+    root = Path(root)
+    tl = load(root)
+    if not tl:
+        return {"clips": [], "hens": []}
+    d = next((x for x in tl["days"] if x["day"] == day), None)
+    if d is None:
+        return {"clips": [], "hens": []}
+    out, names = [], set()
+    for c in tl["clips"]:
+        if not c.get("run") or c["end"] <= d["from"] or c["start"] >= d["to"]:
+            continue
+        try:
+            h = clip_hens(root / c["run"])
+        except (OSError, ValueError, KeyError):
+            h = None
+        if h is None:
+            continue
+        names |= set(h["hens"])
+        out.append({"run": c["run"], "rel": c["rel"], "start": c["start"], "end": c["end"],
+                    **{k: h[k] for k in ("fps", "hens", "events", "pecks")}})
+    order = [n for n in HENS if n in names] + sorted(names - set(HENS))
+    return {"day": day, "clips": out, "hens": [{"name": n, "color": _color(n)} for n in order]}
