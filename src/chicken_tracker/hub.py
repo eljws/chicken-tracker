@@ -8,6 +8,7 @@ clips under one address, plus progress, frame review and skeleton labelling.
     /run/<run>/naming/                 a clip's naming page     e.g. 2026-11-02/143113-150338_ch04)
     /run/<run>/clips/                  short clips of set-aside pieces, if made
     /metrics/                          per-hen charts for a day: distance, activity, runs
+    /hens/                             every hen's pictures from all clips, grouped, to look her over
 
 The pages are the same ones the single-purpose servers show: each request is handed to that
 page's own handler with the prefix taken off, so they work identically here and on their own.
@@ -46,7 +47,10 @@ def _naming_counts(run: Path) -> dict | None:
 
     try:
         d = json.loads(p.read_text())
-        return {"conflicts": len(I.conflicts(d)), "questions": len(I.questions(d)),
+        cf = run / "identity" / "conflicts.json"  # frame-exact count, written by every save
+        n = json.loads(cf.read_text())["conflicts"] if cf.exists() and cf.stat().st_mtime >= p.stat().st_mtime \
+            else len(I.conflicts(d))
+        return {"conflicts": n, "questions": len(I.questions(d)),
                 "confirmed": len(I.confirmed(d)), "pieces": len(d.get("fragments", {}))}
     except Exception:  # half-written or older format: just don't show counts
         return None
@@ -201,6 +205,19 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
                 day = (parse_qs(query).get("day") or [days[-1] if days else ""])[0]
                 body = Mx.day_metrics(root, all_runs, day) if day else {}
                 return self._send(json.dumps({"days": days, **body}).encode(), "application/json")
+            if path == "/hens":
+                return self._redirect(f"/hens/{q}")
+            if path == "/hens/":
+                return self._send((resources.files("chicken_tracker") / "static" / "hens.html").read_bytes(),
+                                  "text/html; charset=utf-8")
+            if path == "/hens/api":
+                from . import hens as Hn
+                return self._send(json.dumps(Hn.hens_data(root, D.find_runs(root))).encode(), "application/json")
+            m = re.fullmatch(r"/hens/crop/(.+)/([^/]+)", path)
+            if m:
+                from . import hens as Hn
+                p = Hn.crop_path(root, unquote(m[1]), unquote(m[2]))
+                return self._send(p.read_bytes(), "image/jpeg", cache=True) if p else self._send(b"", "text/plain", 404)
             # shared pages: /progress/ /review/ /pose/
             for name in ("progress", "review", "pose"):
                 if path == f"/{name}":
@@ -237,25 +254,60 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
                 return self._delegate(run_app(run, app), rest + q)
             self._send(b'{"error":"not found"}', "application/json", 404)
 
+        def _allowed(self) -> bool:
+            """The outside port (server.gate set) needs the login; the local one doesn't."""
+            gate = getattr(self.server, "gate", None)
+            if gate is None:
+                return True
+            ip = self.client_address[0]
+            if gate.locked(ip):
+                self._send(b"Too many wrong passwords - try again in 10 minutes.", "text/plain", 429)
+                return False
+            if gate.check(self.headers.get("Authorization"), ip):
+                return True
+            body = b"Login needed."
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="Chicken tracker", charset="UTF-8"')
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return False
+
         def do_GET(self):
-            self._route()
+            if self._allowed():
+                self._route()
 
         def do_HEAD(self):
-            self._route()
+            if self._allowed():
+                self._route()
 
         def do_POST(self):
-            self._route()
+            if self._allowed():
+                self._route()
 
     return Handler
 
 
 def serve(root: Path = Path("output"), dataset: Path | None = Path("dataset"), port: int = 8760,
-          open_browser: bool = True, device: str | None = None) -> None:
+          open_browser: bool = True, device: str | None = None, public_port: int | None = None) -> None:
+    """Local page on 127.0.0.1:port. With public_port, the same pages (same handler, so the same
+    naming data and undo history) also on every network address at public_port, behind the login."""
     if dataset is not None and not (Path(dataset) / "labels.json").exists():
         dataset = None
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(Path(root), dataset, device))
+    handler = make_handler(Path(root), dataset, device)
+    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     url = f"http://127.0.0.1:{port}/"
     print(f"Chicken tracker home for {root}/ at {url}  - Ctrl+C to stop")
+    if public_port:
+        from .auth import AUTH_FILE, Gate
+
+        gate = Gate()  # with no password set yet it lets nobody in; setting one takes effect at once
+        outside = ThreadingHTTPServer(("0.0.0.0", public_port), handler)
+        outside.gate = gate
+        threading.Thread(target=outside.serve_forever, daemon=True).start()
+        print(f"Also on port {public_port} for other devices / the router, login needed" +
+              ("" if gate.ready else f" - NO PASSWORD SET YET, nobody can log in: run `chicken-tracker password` ({AUTH_FILE})"))
     if open_browser:
         webbrowser.open(url)
     try:

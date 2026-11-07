@@ -288,6 +288,13 @@ def make_handler(run_dir: Path):
         return {"track": t, "start": f["start"], "duration_s": round(f["end"] - f["start"], 1),
                 "sure": t in I.confirmed(store.data), "strip": I.strip_frames(st["det"], t, STRIP_LEN)}
 
+    seen_cache: dict = {}
+
+    def seen() -> dict:  # frames each piece has a box in; changes only when pieces are cut or undone
+        if seen_cache.get("v") != (st["version"], id(st["det"])):
+            seen_cache.update(v=(st["version"], id(st["det"])), frames=I.seen_frames(st["det"]))
+        return seen_cache["frames"]
+
     def state() -> dict:
         d = store.data
         fr = d["fragments"]
@@ -303,7 +310,7 @@ def make_handler(run_dir: Path):
         qs = I.questions(d)
         aside = {reason: [{"track": t, "crop": mid_crop(t)} for t in d.get(key, [])]
                  for reason, key in I.EXCLUDED_KEYS.items()}
-        cf = I.conflicts(d)
+        cf = I.conflicts(d, seen=seen())
         ck = current_checks()
         return {"chickens": chickens, "aside": aside, "fps": d["fps"], "version": st["version"],
                 "checks": len(ck), "check": _check_view(ck[0]) if ck else None,
@@ -323,11 +330,16 @@ def make_handler(run_dir: Path):
     def _conflict(cf: dict) -> dict:
         c = next(c for c in store.data["chickens"] if c["id"] == cf["chicken"])
         fr = store.data["fragments"]
-        lo = max(fr[str(cf["a"])]["start"], fr[str(cf["b"])]["start"])
-        hi = min(fr[str(cf["a"])]["end"], fr[str(cf["b"])]["end"])
+        lo = cf.get("from_s", max(fr[str(cf["a"])]["start"], fr[str(cf["b"])]["start"]))
+        hi = cf.get("to_s", min(fr[str(cf["a"])]["end"], fr[str(cf["b"])]["end"]))
         pieces = []
         for t, other in ((cf["a"], cf["b"]), (cf["b"], cf["a"])):
             p = piece(t)
+            # the 12 pictures are spread over the whole piece and can all miss a short overlap:
+            # add up to 6 from inside it, so it can be seen and painted
+            fps = store.data["fps"]
+            ov = I.gap_frames(st["det"], t, round(lo * fps), round(hi * fps), n=6)  # round: ends are frame times
+            p["strip"] = sorted(set(p["strip"]) | set(ov))
             p["can_isolate"] = bool(I.overlap_cuts(st["det"], t, other))
             p["other"] = other
             pieces.append(p)
@@ -410,29 +422,37 @@ def make_handler(run_dir: Path):
 
     def do_mark(track: int, marks: list[dict]) -> dict:
         """Marked filmstrip pictures -> cut the piece where the marks change, answer each part."""
+        return do_marks([(track, marks)])
+
+    def do_marks(items: list[tuple[int, list[dict]]]) -> dict:
+        """Several pieces marked at once (a conflict's A and B): cut each where its marks change and
+        answer every part, as one undo step."""
         with lock:
-            cuts, labels = I.mark_segments(st["det"], track, [(m["frame"], m["label"]) for m in marks])
+            segs = [(t, *I.mark_segments(st["det"], t, [(m["frame"], m["label"]) for m in marks])) for t, marks in items]
+            if not segs:
+                raise ValueError("nothing marked")
             names = {f"c{c['id']}": (c["name"] or f"Chicken {c['id'] + 1}") for c in store.data["chickens"]}
             words = {"unsure": "can't tell", "not_chicken": "not a chicken", "multiple": "several", **names}
             box = {"partial": " (only part)", "loose": " (box too big)"}
             word = lambda l: words.get(l.split(":")[0], l) + box.get(l.partition(":")[2], "")
-            store.snapshot(f"marked piece #{track}: " + " | ".join(word(l) for l in labels),
-                           with_features=bool(cuts))
-            pieces = [track]
-            for f in reversed(cuts):  # last cut first: each new piece is the tail of `track`
-                st["det"] = I.split_piece(run_dir, store.data, st["det"], track, f)
-                pieces.insert(1, store.data["splits"][-1]["new"])
-            if cuts:
-                st["frags"] = _frags_from(st["det"])
-            owner = I.chicken_of(store.data)
-            for t, lab in zip(pieces, labels):
-                lab, _, flag = lab.partition(":")  # "c3:partial" = hen 3, only part of her / box too big
-                if lab.startswith("c"):
-                    c = int(lab[1:])
-                    verdict = flag if flag in I.BOX_FLAGS else "yes" if owner.get(t) == c else "moved"
-                    I.apply_answer(store.data, t, c, verdict)
-                else:
-                    I.apply_answer(store.data, t, None, lab)
+            store.snapshot("; ".join(f"marked piece #{t}: " + " | ".join(word(l) for l in labels) for t, _, labels in segs),
+                           with_features=any(cuts for _, cuts, _ in segs))
+            for track, cuts, labels in segs:
+                pieces = [track]
+                for f in reversed(cuts):  # last cut first: each new piece is the tail of `track`
+                    st["det"] = I.split_piece(run_dir, store.data, st["det"], track, f)
+                    pieces.insert(1, store.data["splits"][-1]["new"])
+                if cuts:
+                    st["frags"] = _frags_from(st["det"])
+                owner = I.chicken_of(store.data)
+                for t, lab in zip(pieces, labels):
+                    lab, _, flag = lab.partition(":")  # "c3:partial" = hen 3, only part of her / box too big
+                    if lab.startswith("c"):
+                        c = int(lab[1:])
+                        verdict = flag if flag in I.BOX_FLAGS else "yes" if owner.get(t) == c else "moved"
+                        I.apply_answer(store.data, t, c, verdict)
+                    else:
+                        I.apply_answer(store.data, t, None, lab)
             I.refresh_confidence(store.data, st["frags"])
             st["version"] += 1
             store.save()
@@ -566,6 +586,8 @@ def make_handler(run_dir: Path):
                     return self._json(do_undo())
                 if self.path == "/api/mark":
                     return self._json(do_mark(int(body["track"]), list(body["marks"])))
+                if self.path == "/api/marks":  # conflicts: A and B painted, one Apply
+                    return self._json(do_marks([(int(p["track"]), list(p["marks"])) for p in body["pieces"]]))
                 if self.path == "/api/split":
                     return self._json(do_split(int(body["track"]), int(body["frame"])))
             except (KeyError, ValueError, StopIteration) as e:

@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hens — every picture</title>
+<style>
+  :root { --Monster: #3987e5; --Ginger: #d95926; --Rocky: #199e70; --Salt: #c98500; --Pepper: #d55181; --aside: #9a9a95; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #141414; color: #eee; font: 14px/1.4 system-ui, sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; background: #1f1f1f; border-bottom: 1px solid #333; padding: 8px 16px; }
+  header .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 3px 0; }
+  h1 { font-size: 18px; margin: 0 10px 0 0; font-weight: 600; }
+  .lbl { color: #999; font-size: 12px; min-width: 64px; }
+  button.c { background: #2d2d2d; color: #ddd; border: 1px solid #555; border-radius: 6px; padding: 4px 10px; cursor: pointer; font: inherit; }
+  button.c:hover { background: #3a3a3a; }
+  button.c.on { background: #4a4a4a; color: #fff; outline: 2px solid #ffc107; font-weight: 600; }
+  button.hen { border-left: 6px solid var(--hc) !important; }
+  .muted { color: #999; font-size: 13px; }
+  main { padding: 10px 16px 60px; }
+  .cols { display: grid; gap: 10px; align-items: start; }
+  .col { background: #1a1a1a; border: 1px solid #2c2c2c; border-radius: 8px; padding: 6px 8px; min-width: 0; }
+  .col > h2 { margin: 0 0 4px; font-size: 16px; display: flex; gap: 8px; align-items: baseline; border-left: 6px solid var(--hc); padding-left: 8px; }
+  .grp { margin: 6px 0 10px; }
+  .grp h3 { margin: 0 0 4px; font-size: 13px; font-weight: 500; color: #ccc; display: flex; gap: 8px; align-items: baseline; }
+  .pics { display: flex; flex-wrap: wrap; gap: 4px; }
+  .pic { position: relative; width: var(--sz); height: var(--sz); background: #000; border-radius: 5px; border: 2px solid #333; cursor: pointer; overflow: hidden; }
+  .pic img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .pic.sure { border-color: #4caf50; }
+  .pic.partial { border-style: dashed; border-color: #ffb74d; } .pic.loose { border-style: dotted; border-color: #64b5f6; }
+  .pic .b { position: absolute; left: 0; right: 0; bottom: 0; font-size: 10px; line-height: 1.35; text-align: center; color: #fff;
+            background: color-mix(in srgb, var(--bc, #000) 80%, transparent); white-space: nowrap; overflow: hidden; }
+  .pic.sel { outline: 3px solid #ffc107; }
+  #pop { position: fixed; right: 14px; bottom: 14px; width: 560px; max-height: 86vh; overflow: auto; z-index: 10; display: none;
+         background: #262626; border: 1px solid #555; border-radius: 10px; padding: 12px; box-shadow: 0 8px 30px #000a; }
+  #pop .crops { display: flex; gap: 6px; } #pop .crops img { height: 120px; border-radius: 6px; background: #000; }
+  #pop .acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  #pop a { color: #8ab4f8; }
+  .yes { background: #2e7d32 !important; border-color: #4caf50 !important; }
+  .no { background: #8e2b2b !important; border-color: #e57373 !important; }
+  #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #333; padding: 8px 16px; border-radius: 6px;
+           opacity: 0; transition: opacity .3s; z-index: 20; }
+  .key { display: inline-flex; gap: 10px; flex-wrap: wrap; }
+  .key span { display: inline-flex; gap: 4px; align-items: center; }
+  .sw { width: 14px; height: 14px; border-radius: 3px; border: 2px solid; display: inline-block; }
+</style>
+</head>
+<body>
+<header>
+  <div class="row"><h1>🐔 Hens</h1><span class="muted" id="sub">loading…</span>
+    <span class="muted key" style="margin-left:auto">
+      <span><i class="sw" style="border-color:#4caf50"></i>confirmed by you</span>
+      <span><i class="sw" style="border-color:#555"></i>not confirmed</span>
+      <span><i class="sw" style="border-color:#ffb74d;border-style:dashed"></i>only part</span>
+      <span><i class="sw" style="border-color:#64b5f6;border-style:dotted"></i>box too big</span></span></div>
+  <div class="row"><span class="lbl">Hens</span><span id="hens" class="row" style="margin:0"></span></div>
+  <div class="row"><span class="lbl">Group by</span><span id="groups" class="row" style="margin:0"></span></div>
+  <div class="row"><span class="lbl">Show</span><span id="shows" class="row" style="margin:0"></span>
+    <span class="lbl" style="margin-left:14px;min-width:0">Day</span><span id="days" class="row" style="margin:0"></span>
+    <span class="lbl" style="margin-left:14px;min-width:0">Size</span><input type="range" id="size" min="44" max="160" value="72"></div>
+</header>
+<main id="main"></main>
+<div id="pop"></div>
+<div id="toast"></div>
+<script>
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const css = getComputedStyle(document.documentElement);
+const colour = h => css.getPropertyValue("--" + h).trim() || "#9a9a95";
+const hhmm = s => `${String(Math.floor(s / 3600)).padStart(2, "0")}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}`;
+const hms = s => `${hhmm(s)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+const dayOf = run => /^\d{4}-\d{2}-\d{2}/.test(run) ? run.slice(0, 10) : "other";  // a clip outside a day folder
+const dayName = d => d === "other" ? "no date" : new Date(d + "T12:00").toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+function toast(m, ms = 1600) { const t = document.getElementById("toast"); t.textContent = m; t.style.opacity = 1; clearTimeout(t._t);
+  t._t = setTimeout(() => t.style.opacity = 0, ms); }
+
+const ASIDE = "Set aside";
+const P = new URLSearchParams(location.hash.slice(1));
+const V = { hen: P.get("hen") || "all", group: P.get("group") || "clip", show: P.get("show") || "all", day: P.get("day") || "all", size: +(P.get("size") || 72) };
+let D = null, cur = null;
+const save = () => history.replaceState(null, "", "#" + new URLSearchParams(V).toString());
+
+// ---- groupings: each returns [key, title, sort order] for a piece
+const SURE = p => p.sure ? [0, "✓ confirmed by you"] : p.rec && p.rec === p.hen ? [1, "named by the recogniser"] : [2, "guess (recogniser unsure or disagrees)"];
+const ODD_B = [[0.12, "typical of her"], [0.2, "a bit unlike her"], [0.3, "unlike her"], [9, "very unlike her — look first"]];
+const GROUPS = {
+  clip: ["Day & clip", p => [p.run, `${dayName(dayOf(p.run))} · clip ${hhmm(p.clock_s - p.t)}`, p.run]],
+  hour: ["Time of day", p => { const h = Math.floor(p.clock_s / 3600); return [h, `${String(h).padStart(2, "0")}:00–${String(h + 1).padStart(2, "0")}:00`, h]; }],
+  sure: ["How sure", p => { const [k, n] = SURE(p); return [k, n, k]; }],
+  box: ["Box", p => { const k = p.flag || "full"; return [k, { full: "whole hen in the box", partial: "◐ only part of her", loose: "◑ box too big" }[k], ["full", "partial", "loose"].indexOf(k)]; }],
+  odd: ["Looks like her", p => { if (p.odd === undefined) return ["?", "no appearance data", 9];
+    const i = ODD_B.findIndex(([x]) => p.odd < x); return [i, ODD_B[i][1], -i]; }],
+  rec: ["Recogniser says", p => { const k = p.rec || "?"; return [k, p.rec ? `recogniser: ${p.rec}` : "no recogniser answer", p.rec === p.hen ? "0" : "1" + k]; }],
+};
+const SHOWS = { all: "everything", todo: "only not confirmed", doubt: "only doubtful (not confirmed, and unlike her or recogniser disagrees)" };
+
+async function load(keepScroll) {
+  const y = scrollY;
+  D = await (await fetch("api")).json();
+  render();
+  if (keepScroll) scrollTo(0, y);
+}
+function chip(id, k, label, on, extra = "") { return `<button class="c ${extra}" data-${id}="${esc(k)}" ${on ? "" : ""}>${label}</button>`; }
+function controls() {
+  const hens = [["all", "All side by side"], ...D.hens.map(h => [h, h]), [ASIDE, "Set aside"]];
+  document.getElementById("hens").innerHTML = hens.map(([k, n]) =>
+    `<button class="c ${k !== "all" ? "hen" : ""} ${V.hen === k ? "on" : ""}" data-hen="${esc(k)}" style="--hc:${k === ASIDE ? colour("aside") : colour(k)}">${esc(n)}
+      <span class="muted">${k === "all" ? "" : count(k)}</span></button>`).join("");
+  document.getElementById("groups").innerHTML = Object.entries(GROUPS).map(([k, [n]]) =>
+    `<button class="c ${V.group === k ? "on" : ""}" data-group="${k}">${n}</button>`).join("");
+  document.getElementById("shows").innerHTML = Object.entries(SHOWS).map(([k, n]) =>
+    `<button class="c ${V.show === k ? "on" : ""}" data-show="${k}">${n}</button>`).join("");
+  const days = [...new Set(D.pieces.map(p => dayOf(p.run)))].sort();
+  document.getElementById("days").innerHTML = [["all", "all"], ...days.map(d => [d, dayName(d)])].map(([k, n]) =>
+    `<button class="c ${V.day === k ? "on" : ""}" data-day="${k}">${n}</button>`).join("");
+  document.querySelectorAll("header [data-hen],header [data-group],header [data-show],header [data-day]").forEach(b => b.onclick = () => {
+    for (const k of ["hen", "group", "show", "day"]) if (b.dataset[k] !== undefined) V[k] = b.dataset[k];
+    save(); render(); });
+  const sz = document.getElementById("size"); sz.value = V.size;
+  sz.oninput = () => { V.size = +sz.value; document.documentElement.style.setProperty("--sz", V.size + "px"); save(); };
+  document.documentElement.style.setProperty("--sz", V.size + "px");
+}
+const doubtful = p => !p.sure && ((p.odd ?? 0) >= 0.2 || p.closer_to || (p.rec && p.hen && p.rec !== p.hen));
+const visible = p => (V.day === "all" || dayOf(p.run) === V.day) &&
+  (V.show === "all" || (V.show === "todo" && !p.sure) || (V.show === "doubt" && doubtful(p)));
+const ofHen = h => p => h === ASIDE ? !p.hen : p.hen === h;
+const count = h => D.pieces.filter(p => ofHen(h)(p) && visible(p)).length;
+
+function render() {
+  controls();
+  const hens = V.hen === "all" ? D.hens : [V.hen];
+  const ps = D.pieces.filter(visible);
+  const n = ps.length, sure = ps.filter(p => p.sure).length;
+  document.getElementById("sub").textContent = `${n} pieces shown from ${new Set(ps.map(p => p.run)).size} clips · ${sure} confirmed · one picture per piece · click one to look closer or fix it`;
+  const side = hens.length > 1;
+  const main = document.getElementById("main");
+  main.innerHTML = `<div class="cols" style="grid-template-columns:repeat(${hens.length}, minmax(0, 1fr))">${hens.map(h => column(h, ps.filter(ofHen(h)), side)).join("")}</div>`;
+  main.querySelectorAll(".pic").forEach(el => el.onclick = () => open(+el.dataset.i));
+}
+function column(h, ps, side) {
+  const fn = GROUPS[V.group][1], g = new Map();
+  for (const p of ps) { const [k, title, order] = h === ASIDE && V.group === "sure" ? [p.aside, p.aside, p.aside] : fn(p);
+    if (!g.has(k)) g.set(k, { title, order, ps: [] }); g.get(k).ps.push(p); }
+  const groups = [...g.values()].sort((a, b) => a.order < b.order ? -1 : a.order > b.order ? 1 : 0);
+  const sortIn = V.group === "odd" ? (a, b) => (b.odd ?? 0) - (a.odd ?? 0) : (a, b) => a.clock_s - b.clock_s || a.run.localeCompare(b.run);
+  const secs = ps.reduce((s, p) => s + p.duration_s, 0);
+  return `<div class="col"><h2 style="--hc:${h === ASIDE ? colour("aside") : colour(h)}">${esc(h)}
+      <span class="muted">${ps.length} pieces · ${(secs / 60).toFixed(0)} min · ${ps.filter(p => p.sure).length} confirmed</span></h2>
+    ${groups.map(gr => `<div class="grp"><h3>${esc(gr.title)} <span class="muted">${gr.ps.length}</span></h3>
+      <div class="pics">${gr.ps.sort(sortIn).map(pic).join("")}</div></div>`).join("") || '<div class="muted">nothing to show</div>'}</div>`;
+}
+function pic(p) {
+  const i = D.pieces.indexOf(p);
+  // hints only on pieces you haven't confirmed: once you've said who it is, a hint is just noise
+  const badge = p.aside ? [p.aside, "#555"] : p.sure ? null : p.closer_to ? [`≈ ${p.closer_to}?`, colour(p.closer_to)]
+    : p.rec && p.rec !== p.hen ? [`rec: ${p.rec}`, colour(p.rec)] : null;
+  const tip = `${p.hen || p.aside} · ${dayName(dayOf(p.run))} ${hms(p.clock_s)} · ${p.duration_s}s · piece #${p.track}` +
+    (p.sure ? " · confirmed" : "") + (p.rec ? ` · recogniser: ${p.rec} (${Math.round(p.rec_p * 100)}%)` : "") +
+    (p.odd !== undefined ? ` · unlike her: ${p.odd.toFixed(2)}` : "") + (p.closer_to ? ` · looks closer to ${p.closer_to}` : "");
+  return `<div class="pic ${p.sure ? "sure" : ""} ${p.flag || ""} ${cur === i ? "sel" : ""}" data-i="${i}" title="${esc(tip)}">
+    <img loading="lazy" src="crop/${p.run}/${encodeURIComponent(p.crop)}">${badge ? `<span class="b" style="--bc:${badge[1]}">${esc(badge[0])}</span>` : ""}</div>`;
+}
+
+function open(i) {
+  cur = i; const p = D.pieces[i], ids = D.ids[p.run] || {}, pop = document.getElementById("pop");
+  document.querySelectorAll(".pic.sel").forEach(x => x.classList.remove("sel"));
+  document.querySelector(`.pic[data-i="${i}"]`)?.classList.add("sel");
+  const here = p.hen ? ids[p.hen] : null;
+  const hensHere = Object.keys(ids).filter(n => n !== p.hen);
+  pop.style.display = "block";
+  pop.innerHTML = `<div style="display:flex;gap:8px;align-items:baseline"><b style="font-size:16px">${esc(p.hen || p.aside)}</b>
+      <span class="muted">${dayName(dayOf(p.run))} ${hms(p.clock_s)} · ${p.duration_s}s · piece #${p.track}${p.sure ? " · ✓ confirmed" : ""}</span>
+      <button class="c" id="pclose" style="margin-left:auto">close</button></div>
+    <div class="crops" style="margin-top:6px">${p.crops.map(c => `<img src="crop/${p.run}/${encodeURIComponent(c)}">`).join("")}</div>
+    <div class="muted" style="margin-top:6px">${p.rec ? `Recogniser: <b>${esc(p.rec)}</b> (${Math.round(p.rec_p * 100)}%)` : "No recogniser answer"}${p.odd !== undefined ?
+      ` · unlike ${esc(p.hen)}: ${p.odd.toFixed(2)} (0 = typical)` : ""}${p.closer_to ? ` · looks closer to <b>${esc(p.closer_to)}</b>` : ""}</div>
+    <div class="acts">
+      ${here !== undefined && here !== null ? `<button class="c yes" data-v="yes" data-c="${here}">✓ is ${esc(p.hen)}</button>
+        <button class="c" data-v="partial" data-c="${here}">◐ only part of ${esc(p.hen)}</button>
+        <button class="c" data-v="loose" data-c="${here}">◑ ${esc(p.hen)}, box too big</button>` : ""}
+      ${hensHere.map(n => `<button class="c hen" style="--hc:${colour(n)}" data-v="moved" data-c="${ids[n]}">→ ${esc(n)}</button>`).join("")}
+      <button class="c" data-v="unsure">can't tell which hen</button>
+      <button class="c no" data-v="not_chicken">not a chicken</button>
+      <button class="c no" data-v="multiple">several</button></div>
+    <div class="muted" style="margin-top:8px">
+      <a href="../run/${p.run}/naming/#name" target="_blank">open this clip's naming page</a> ·
+      <a href="../run/${p.run}/player/#t=${p.t}" target="_blank">play it in the player at ${hms(p.clock_s)}</a></div>`;
+  pop.querySelector("#pclose").onclick = close;
+  pop.querySelectorAll("button[data-v]").forEach(b => b.onclick = async () => {
+    const body = { track: p.track, chicken: b.dataset.c !== undefined ? +b.dataset.c : null, verdict: b.dataset.v };
+    const r = await fetch(`../run/${p.run}/naming/api/answer`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({ error: `error ${r.status}` }));
+    if (j.error) return toast(j.error, 4000);
+    toast(`Done ✓ — undo it on that clip's naming page (↶ Undo)`, 2500); close(); load(true);
+  });
+}
+function close() { cur = null; document.getElementById("pop").style.display = "none"; document.querySelectorAll(".pic.sel").forEach(x => x.classList.remove("sel")); }
+addEventListener("keydown", e => { if (e.key === "Escape") close(); });
+load();
+</script>
+</body>
+</html>

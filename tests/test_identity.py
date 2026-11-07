@@ -86,6 +86,21 @@ def test_conflicts_found_after_manual_merge():
     assert I.conflicts(d) == []
 
 
+
+def test_conflict_needs_real_shared_frames():
+    """A piece inside another piece's gap (same hen lost for a few seconds) isn't a conflict."""
+    import numpy as np
+    fr = {1: frag(1, 0, 10, A), 2: frag(2, 4, 6, A)}
+    d = _data(fr, [[1, 2]])
+    d["fps"] = 10.0
+    assert len(I.conflicts(d)) == 1  # by start..end alone they overlap 2 s
+    gap = {1: np.r_[np.arange(0, 35), np.arange(70, 100)], 2: np.arange(40, 60)}
+    assert I.conflicts(d, seen=gap) == []  # 2 sits in 1's gap: never on screen together
+    both = {1: np.arange(0, 100), 2: np.arange(40, 60)}
+    assert I.conflicts(d, seen=both) == [{"chicken": 0, "a": 1, "b": 2, "overlap_s": 2.0, "from_s": 4.0, "to_s": 5.9}]
+    flicker = {1: np.arange(0, 100, 3), 2: np.arange(40, 60)}  # 1's box only every 3rd frame: still together
+    assert len(I.conflicts(d, seen=flicker)) == 1
+
 def _det(rows):
     import pandas as pd
     return pd.DataFrame([{"frame": f, "time_s": f / 10, "track_id": t, "x1": 0, "y1": 0, "x2": 1, "y2": 1,

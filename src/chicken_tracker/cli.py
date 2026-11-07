@@ -240,7 +240,23 @@ def cmd_backup(a: argparse.Namespace) -> None:
 def cmd_dashboard(a: argparse.Namespace) -> None:
     from .hub import serve
 
-    serve(a.out, dataset=a.dataset, port=a.port, open_browser=not a.no_browser, device=a.device)
+    serve(a.out, dataset=a.dataset, port=a.port, open_browser=not a.no_browser, device=a.device,
+          public_port=a.public_port)
+
+
+def cmd_password(a: argparse.Namespace) -> None:
+    import getpass
+
+    from .auth import AUTH_FILE, set_password
+
+    user = input("Username: ").strip()
+    pw = getpass.getpass("New password (at least 12 characters): ")
+    if not user or len(pw) < 12:
+        raise SystemExit("Not changed: give a username and a password of 12 or more characters.")
+    if getpass.getpass("Same password again: ") != pw:
+        raise SystemExit("Not changed: the two passwords differ.")
+    set_password(user, pw)
+    print(f"Saved (only a hash, readable by you only) in {AUTH_FILE}. Restart `chicken-tracker home` to use it.")
 
 
 def cmd_preview(a: argparse.Namespace) -> None:
@@ -447,9 +463,15 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("-o", "--out", type=Path, default=Path("output"))
         p.add_argument("-d", "--dataset", type=Path, default=Path("dataset"), help="for the labelling pages")
         p.add_argument("--port", type=int, default=8760)
+        p.add_argument("--public-port", type=int, help="also serve on this port to other devices / the "
+                                                        "internet (router port forward), behind the login "
+                                                        "set with `chicken-tracker password`")
         p.add_argument("--device", help="for click-to-outline on the labelling page: cpu, mps, 0, ...")
         p.add_argument("--no-browser", action="store_true")
         p.set_defaults(func=cmd_dashboard)
+
+    p = sub.add_parser("password", help="set the login for reaching `home --public-port` from outside")
+    p.set_defaults(func=cmd_password)
 
     p = sub.add_parser("stations", help="feeder/water positions from labelled boxes + per-chicken visits")
     p.add_argument("run_dir", type=Path)
