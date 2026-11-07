@@ -29,6 +29,7 @@ from pathlib import Path
 from urllib.parse import quote, unquote
 
 from . import dashboard as D
+from . import versions as V
 
 APPS = ("player", "naming", "clips")
 
@@ -50,8 +51,15 @@ def _naming_counts(run: Path) -> dict | None:
         cf = run / "identity" / "conflicts.json"  # frame-exact count, written by every save
         n = json.loads(cf.read_text())["conflicts"] if cf.exists() and cf.stat().st_mtime >= p.stat().st_mtime \
             else len(I.conflicts(d))
-        return {"conflicts": n, "questions": len(I.questions(d)),
-                "confirmed": len(I.confirmed(d)), "pieces": len(d.get("fragments", {}))}
+        out = {"conflicts": n, "questions": len(I.questions(d)),
+               # done = answered by you or set aside, as the naming page's Name & merge count
+               "confirmed": len({int(t) for t in d.get("fragments", {})} & (I.confirmed(d) | I.excluded(d))),
+               "pieces": len(d.get("fragments", {}))}
+        st = run / "identity" / "status.json"  # checks and "?" questions: known once the naming page has run
+        if st.exists() and st.stat().st_mtime >= p.stat().st_mtime - 1:
+            s = json.loads(st.read_text())
+            out.update(checks=s.get("checks"), questions=s.get("questions", out["questions"]), conflicts=s.get("conflicts", n))
+        return out
     except Exception:  # half-written or older format: just don't show counts
         return None
 
@@ -70,6 +78,10 @@ def run_card(root: Path, run: Path) -> dict:
         "thumb": f"{base}thumb?v={int(pic.stat().st_mtime)}" if pic else None,
         "counts": _naming_counts(run),
     })
+    ver = V.of_run(run)
+    for step in s["steps"]:
+        if step["key"] in ver:
+            step["ver"] = ver[step["key"]]
     return s
 
 
@@ -78,6 +90,66 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
     home = lambda: (resources.files("chicken_tracker") / "static" / "home.html").read_bytes()  # fresh each load
     lock = threading.Lock()
     apps: dict = {}  # (run, app) or "progress"/"review"/"pose" -> handler class
+
+    # recompute queue: one job at a time, in the order asked (they share the GPU)
+    jobs: list[dict] = []          # waiting, and the one running first
+    job_log: list[dict] = []       # finished, newest last (shown as the step's tooltip)
+    jobs_cv = threading.Condition()
+
+    def queued(rel: str) -> dict[str, str]:
+        with jobs_cv:
+            return {j["step"]: j["state"] for j in jobs if j["run"] == rel}
+
+    def enqueue(rel: str, step: str) -> bool:
+        with jobs_cv:
+            if any(j["run"] == rel and j["step"] == step for j in jobs):
+                return False
+            jobs.append({"run": rel, "step": step, "state": "queued", "asked": time.time()})
+            jobs_cv.notify()
+            return True
+
+    def run_job(j: dict) -> None:
+        import subprocess
+        import sys
+
+        run = root / j["run"]
+        exe = str(Path(sys.executable).parent / "chicken-tracker")
+        dev = ["--device", device] if device else []
+        cwd = str(Path.cwd())
+        if j["step"] == "naming":
+            from . import records
+
+            cur = next((m for m in records.models("recognizer") if m["status"] == "current"), None)
+            if cur is None:
+                raise RuntimeError("no recogniser in use")
+            cls = run_app(run, "naming")
+            j["result"] = cls.reguess(cur["path"], cur["version"], device)
+            return
+        steps = [[exe, "pose", str(run), *dev], [exe, "pecks", str(run)]] if j["step"] == "skeletons" \
+            else [[exe, "pecks", str(run)]]
+        for cmd in steps:
+            r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+            if r.returncode:
+                raise RuntimeError((r.stderr or r.stdout).strip().splitlines()[-1] if (r.stderr or r.stdout).strip() else f"exit {r.returncode}")
+
+    def worker():
+        while True:
+            with jobs_cv:
+                while not jobs:
+                    jobs_cv.wait()
+                j = jobs[0]
+                j["state"] = "running"
+            try:
+                run_job(j)
+                j["state"] = "done"
+            except Exception as e:  # noqa: BLE001 - shown on the page
+                j.update(state="failed", error=f"{type(e).__name__}: {e}")
+            with jobs_cv:
+                jobs.pop(0)
+                job_log.append({**j, "finished": time.time()})
+                del job_log[:-50]
+
+    threading.Thread(target=worker, daemon=True).start()
 
     def find_run(rel: str) -> Path | None:
         p = (root / rel).resolve()
@@ -183,8 +255,29 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
             q = f"?{query}" if query else ""
             if path in ("/", "/index.html"):
                 return self._send(home(), "text/html; charset=utf-8")
+            if path == "/api/recompute" and self.command == "POST":
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or "{}")
+                added = 0
+                for item in body.get("items", []):
+                    rel, step = str(item.get("run", "")), str(item.get("step", ""))
+                    run = find_run(rel)
+                    if run is None or step not in V.UPDATABLE:
+                        return self._send(json.dumps({"error": f"can't recompute {step} of {rel}"}).encode(),
+                                          "application/json", 400)
+                    added += enqueue(str(run.relative_to(root)), step)
+                return self._send(json.dumps({"queued": added}).encode(), "application/json")
             if path == "/api/home":
                 runs = [run_card(root, r) for r in D.find_runs(root)]
+                last = {}
+                for j in job_log:
+                    last[(j["run"], j["step"])] = j
+                for r in runs:
+                    q = queued(r["run"])
+                    for st_ in r["steps"]:
+                        if st_["key"] in q:
+                            st_["job"] = q[st_["key"]]
+                        elif (r["run"], st_["key"]) in last and last[(r["run"], st_["key"])]["state"] == "failed":
+                            st_["job_error"] = last[(r["run"], st_["key"])].get("error")
                 extra = {}
                 if dataset is not None and (Path(dataset) / "labels.json").exists():
                     items = json.loads((Path(dataset) / "labels.json").read_text())
@@ -210,6 +303,16 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
             if path == "/hens/":
                 return self._send((resources.files("chicken_tracker") / "static" / "hens.html").read_bytes(),
                                   "text/html; charset=utf-8")
+            if path == "/hens/sizes":  # GET: the saved size calibration (+ stale?); POST: learn it again
+                from . import sizes as SZ
+                runs = D.find_runs(root)
+                try:
+                    cal = SZ.build(root, runs) if self.command == "POST" or SZ.load(root) is None else SZ.load(root)
+                except ValueError as e:
+                    return self._send(json.dumps({"error": str(e)}).encode(), "application/json")
+                newest = max(((r / "identity" / "identity.json").stat().st_mtime for r in runs
+                              if (r / "identity" / "identity.json").exists()), default=0)
+                return self._send(json.dumps({"cal": cal, "stale": newest > cal["built"] + 1}).encode(), "application/json")
             if path == "/hens/api":
                 from . import hens as Hn
                 return self._send(json.dumps(Hn.hens_data(root, D.find_runs(root))).encode(), "application/json")

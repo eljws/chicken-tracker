@@ -22,7 +22,7 @@
   .day.has:hover { background: #3b523b; }
   .day.sel { outline: 2px solid #4caf50; }
   .day.todo { background: #4a3b20; }
-  .day .n { position: absolute; bottom: 1px; left: 0; right: 0; font-size: 10px; color: #9c9; }
+  .day .n { position: absolute; bottom: 1px; left: 0; right: 0; font-size: 9px; color: #9c9; white-space: nowrap; overflow: hidden; }
   .day.todo .n { color: #ffb74d; }
   .day.today { box-shadow: inset 0 0 0 1px #666; }
   .clips { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
@@ -36,13 +36,25 @@
   .steps { display: flex; gap: 6px; flex-wrap: wrap; }
   .chip { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: #262626; color: #777; }
   .chip.done { color: #81c784; } .chip.running { color: #ffc107; } .chip.failed, .chip.stalled { color: #f44336; }
+  .chip .v { opacity: .8; margin-left: 4px; font-size: 11px; }
+  .chip.done.old { color: #ffd54f; background: #2e2a1a; }
+  .chip.queued { color: #90caf9; }
+  .chip button.upd { font: inherit; font-size: 11px; margin-left: 6px; padding: 0 6px; border-radius: 8px; border: 1px solid #806a1f;
+                     background: #3a3216; color: #ffe082; cursor: pointer; } .chip button.upd:hover { background: #4d4220; }
+  .updall { font-size: 13px; padding: 3px 10px; border-radius: 6px; border: 1px solid #806a1f; background: #3a3216; color: #ffe082; cursor: pointer; margin-left: 10px; vertical-align: middle; }
   .todo-line { color: #ffb74d; } .ok-line { color: #81c784; }
   .hens { font-size: 13px; color: #bbb; }
   .hens b { color: #eee; font-weight: 600; }
   .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: auto; }
-  .btns a, .btns span { padding: 5px 12px; border-radius: 6px; text-decoration: none; font-size: 13px; }
+  .btns > a, .btns > span { padding: 5px 12px; border-radius: 6px; text-decoration: none; font-size: 13px; }
   .btns a { background: #2e4a2e; color: #e8f5e9; } .btns a:hover { background: #3d613d; }
-  .btns span { background: #222; color: #555; cursor: help; }
+  .btns a.nm { position: relative; overflow: hidden; padding-bottom: 7px; }
+  .btns a.nm.todo { background: #3a3216; color: #ffe082; border: 1px solid #806a1f; } .btns a.nm.todo:hover { background: #4d4220; }
+  .btns a.nm .bar { position: absolute; left: 0; bottom: 0; height: 3px; background: #ffb74d; }
+  .btns a.nm .bar.bg { width: 100%; background: #00000055; }
+  .btns a.nm .n { font-variant-numeric: tabular-nums; margin-left: 6px; opacity: .9; }
+  .btns a.nm .w { margin-left: 8px; font-size: 12px; color: #ffcc80; }
+  .btns > span { background: #222; color: #555; cursor: help; }
   .empty { color: #888; padding: 30px; }
 </style>
 </head>
@@ -71,7 +83,22 @@ const byDay = () => {
   for (const k in m) m[k].sort((a, b) => (a.from || "").localeCompare(b.from || ""));
   return m;
 };
-const needsYou = r => r.counts && (r.counts.conflicts + r.counts.questions) > 0;
+const namingLeft = c => c ? (c.pieces - c.confirmed) + c.conflicts + c.questions + (c.checks || 0) : 0;
+const needsYou = r => namingLeft(r.counts) > 0;  // the calendar day turns amber, like the Naming button
+function namingButton(r) {  // amber with progress while anything is left; green ✓ when every piece is yours
+  const c = r.counts, href = r.links.naming;
+  if (!c) return `<a href="${href}" target="_blank">✎ Naming</a>`;
+  const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  const waits = [c.conflicts && plural(c.conflicts, "conflict"), c.questions && plural(c.questions, "question"),
+                 c.checks && plural(c.checks, "check")].filter(Boolean);
+  if (!namingLeft(c)) return `<a class="nm" href="${href}" target="_blank" title="Every piece confirmed or set aside by you · nothing waiting${c.checks == null ? " (checks: open the page once to count them)" : ""}">✎ Naming ✓</a>`;
+  const pct = c.pieces ? Math.round(100 * c.confirmed / c.pieces) : 0;
+  const tip = [`${c.confirmed} of ${c.pieces} pieces confirmed or set aside by you (${pct}%)`,
+               c.pieces - c.confirmed ? `${c.pieces - c.confirmed} still the computer's guess` : "",
+               ...waits.map(w => w + " waiting"), c.checks == null ? "checks: open the page once to count them" : ""].filter(Boolean).join("\n");
+  return `<a class="nm todo" href="${href}" target="_blank" title="${esc(tip)}">✎ Naming<span class="n">${c.confirmed}/${c.pieces}</span>${waits.length ? `<span class="w">· ${waits.join(" · ")}</span>` : ""}
+    <span class="bar bg"></span><span class="bar" style="width:${pct}%"></span></a>`;
+}
 
 function renderCals(days) {
   const dated = Object.keys(days).filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d));
@@ -102,14 +129,27 @@ function card(r) {
   const running = r.steps.some(s => s.state === "running");
   const chips = r.steps.map(s => {
     const pct = s.state === "running" && s.total ? ` ${Math.round(100 * s.done / s.total)}%` : "";
-    const mark = { done: "✓", running: "…", failed: "✗", stalled: "?" }[s.state] || "·";
-    return `<span class="chip ${s.state}" title="${esc(s.label)}: ${s.state}">${mark} ${STEP_SHORT[s.key] || s.key}${pct}</span>`;
+    const v = s.ver, old = s.state === "done" && v && v.current === false;
+    const queued = s.job === "queued" && s.state !== "running";
+    const mark = queued ? "⏳" : { done: "✓", running: "…", failed: "✗", stalled: "?" }[s.state] || "·";
+    let tip = `${s.label}: ${queued ? "waiting to be recomputed" : s.state}`;
+    if (v) tip += v.current === false ? `\nmade with ${v.version} - in use now: ${v.latest}${v.note ? " (" + v.note + ")" : ""}`
+                : v.current ? `\nmade with ${v.version} - the latest${v.note ? " (" + v.note + ")" : ""}` : `\n${v.version}`;
+    if (old && !v.can_update) tip += `\nNot offered here: redoing ${s.key === "detect" ? "detection" : "the pieces"} rebuilds the pieces and would throw away this clip's naming.`;
+    if (old && v.can_update) tip += { naming: "\n↻ = the current recogniser re-guesses only the pieces you haven't confirmed; your answers stay (one undo step)",
+                                      skeletons: "\n↻ = skeletons again with the current model (~30 min), then pecks", pecks: "\n↻ = count pecks again (~2 min)" }[s.key];
+    if (s.job_error) tip += `\nLast recompute failed: ${s.job_error}`;
+    const lbl = v ? `<span class="v">${esc(v.short)}</span>` : "";
+    const upd = old && v.can_update && !s.job ? `<button class="upd" data-run="${esc(r.run)}" data-step="${s.key}">↻ ${esc(v.latest_short)}</button>` : "";
+    return `<span class="chip ${queued ? "queued" : s.state} ${old ? "old" : ""}" title="${esc(tip)}">${mark} ${STEP_SHORT[s.key] || s.key}${pct}${lbl}${upd}</span>`;
   }).join("");
   let naming = "";
   if (r.counts) {
-    const todo = r.counts.conflicts + r.counts.questions;
-    naming = todo ? `<div class="todo-line">Naming: ${r.counts.conflicts} conflicts · ${r.counts.questions} questions for you · ${r.counts.confirmed}/${r.counts.pieces} pieces confirmed</div>`
-                  : `<div class="ok-line">Naming: nothing waiting · ${r.counts.confirmed}/${r.counts.pieces} pieces confirmed</div>`;
+    const c = r.counts, guess = c.pieces - c.confirmed;
+    const waits = [c.conflicts && `${c.conflicts} conflict${c.conflicts > 1 ? "s" : ""}`, c.questions && `${c.questions} question${c.questions > 1 ? "s" : ""}`,
+                   c.checks && `${c.checks} check${c.checks > 1 ? "s" : ""}`, guess && `${guess} piece${guess > 1 ? "s" : ""} still the computer's guess`].filter(Boolean);
+    naming = waits.length ? `<div class="todo-line">Naming: ${waits.join(" · ")} · ${c.confirmed}/${c.pieces} confirmed</div>`
+                          : `<div class="ok-line">Naming: done ✓ · all ${c.pieces} pieces confirmed by you</div>`;
     if (r.naming && r.naming.auto) naming = naming.replace("Naming:", "Naming (started by the recogniser):");
   }
   const hens = r.hens.length ? `<div class="hens">${r.hens.map(h => `<b>${esc(h.name)}</b> ${h.visible_min} min` +
@@ -122,7 +162,7 @@ function card(r) {
       <div class="steps">${chips}</div>${naming}${hens}
       <div class="btns">
         ${btn(L.player, "▶ Player", "No browser copy yet: chicken-tracker player RUN --encode-only")}
-        ${btn(L.naming, "✎ Naming", "Not named yet: chicken-tracker identify RUN")}
+        ${L.naming ? namingButton(r) : btn(null, "✎ Naming", "Not named yet: chicken-tracker identify RUN")}
         ${btn(L.clips, "🎞 Set-aside clips", "No clips made for this run")}
       </div>
     </div></div>`;
@@ -138,7 +178,24 @@ function render(force) {
   const rs = days[sel];
   const title = sel === "undated" ? "Clips without a date" :
     new Date(sel + "T12:00").toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
-  el.innerHTML = `<h2>${title} <span class="muted" style="font-size:14px;font-weight:400">${rs.length} clip${rs.length > 1 ? "s" : ""}</span></h2>` + rs.map(card).join("");
+  const outdated = rs.flatMap(r => r.steps.filter(s => s.state === "done" && s.ver && s.ver.can_update && !s.job).map(s => ({ run: r.run, step: s.key })));
+  const nSkel = outdated.filter(o => o.step === "skeletons").length;
+  el.innerHTML = `<h2>${title} <span class="muted" style="font-size:14px;font-weight:400">${rs.length} clip${rs.length > 1 ? "s" : ""}</span>` +
+    (outdated.length ? `<button class="updall" title="Queue every yellow step with ↻ on this day${nSkel ? ` - ${nSkel} skeleton runs take ~30 min each` : ""}">↻ Update ${outdated.length} older step${outdated.length > 1 ? "s" : ""} to the latest</button>` : "") +
+    `</h2>` + rs.map(card).join("");
+  const ua = el.querySelector(".updall");
+  if (ua) ua.onclick = () => { if (!nSkel || confirm(`This queues ${outdated.length} recomputes, including ${nSkel} skeleton runs (~30 min each, ${Math.round(nSkel / 2)} h or so). Go ahead?`)) recompute(outdated); };
+  el.querySelectorAll("button.upd").forEach(b => b.onclick = () => {
+    const what = { naming: "Let the current recogniser re-guess the pieces you haven't confirmed? Your answers stay, and it's one undo step on the naming page.",
+                   skeletons: "Redo the skeletons with the current model (~30 min), then the pecks?", pecks: "Count the pecks again (~2 min)?" }[b.dataset.step];
+    if (confirm(what)) recompute([{ run: b.dataset.run, step: b.dataset.step }]);
+  });
+}
+
+async function recompute(items) {
+  const r = await fetch("api/recompute", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items }) });
+  if (!r.ok) alert((await r.json()).error || "could not queue");
+  lastJson = null; refresh();
 }
 
 async function refresh() {
@@ -150,7 +207,7 @@ async function refresh() {
     const badge = (id, n, label) => { document.getElementById(id).innerHTML = label + (n ? `<span class="badge">${n}</span>` : ""); };
     badge("nrev", D.review_pending, "🖼 Label frames"); badge("npose", D.pose_pending, "🦴 Label skeletons");
     // redraw only when something changed (thumbnails are cached, so a redraw doesn't blink)
-    const key = JSON.stringify(D.runs.map(r => [r.run, r.steps.map(s => [s.state, s.total ? Math.round(100 * s.done / s.total) : 0]), r.counts, r.links, r.thumb, r.hens]));
+    const key = JSON.stringify(D.runs.map(r => [r.run, r.steps.map(s => [s.state, s.total ? Math.round(100 * s.done / s.total) : 0, s.ver && s.ver.version, s.ver && s.ver.current, s.job, s.job_error]), r.counts, r.links, r.thumb, r.hens]));
     if (key !== lastJson) { lastJson = key; render(); }
   } catch (e) { document.getElementById("sub").textContent = "server not reachable"; }
 }

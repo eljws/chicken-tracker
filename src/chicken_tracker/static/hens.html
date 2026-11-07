@@ -42,11 +42,23 @@
   .key { display: inline-flex; gap: 10px; flex-wrap: wrap; }
   .key span { display: inline-flex; gap: 4px; align-items: center; }
   .sw { width: 14px; height: 14px; border-radius: 3px; border: 2px solid; display: inline-block; }
+  .sizes { max-width: 1100px; }
+  .sizes h2 { font-size: 16px; font-weight: 600; margin: 18px 0 2px; } .sizes .sub { color: #999; font-size: 13px; margin-bottom: 8px; }
+  .chart { background: #1d1d1d; border: 1px solid #2c2c2c; border-radius: 8px; padding: 10px; position: relative; }
+  .chart svg { display: block; width: 100%; height: auto; }
+  .chart text { fill: #999; font: 12px system-ui, sans-serif; } .chart .lab { fill: #ddd; font-weight: 600; }
+  .chart .grid line { stroke: #2e2e2e; } .chart .axis { stroke: #555; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; color: #ccc; margin: 4px 0 6px; }
+  .legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+  #tip { position: absolute; pointer-events: none; background: #262626; border: 1px solid #555; border-radius: 6px; padding: 6px 9px;
+         font-size: 12px; color: #ddd; display: none; white-space: nowrap; z-index: 5; }
+  table.num { border-collapse: collapse; font-size: 13px; margin-top: 6px; } table.num td, table.num th { padding: 3px 10px; text-align: right; border-bottom: 1px solid #2a2a2a; }
+  table.num th { color: #999; font-weight: 500; } table.num td:first-child, table.num th:first-child { text-align: left; }
 </style>
 </head>
 <body>
 <header>
-  <div class="row"><h1>🐔 Hens</h1><span class="muted" id="sub">loading…</span>
+  <div class="row"><h1>🐔 Hens</h1><button class="c" id="viewbtn"></button><span class="muted" id="sub">loading…</span>
     <span class="muted key" style="margin-left:auto">
       <span><i class="sw" style="border-color:#4caf50"></i>confirmed by you</span>
       <span><i class="sw" style="border-color:#555"></i>not confirmed</span>
@@ -74,7 +86,7 @@ function toast(m, ms = 1600) { const t = document.getElementById("toast"); t.tex
 
 const ASIDE = "Set aside";
 const P = new URLSearchParams(location.hash.slice(1));
-const V = { hen: P.get("hen") || "all", group: P.get("group") || "clip", show: P.get("show") || "all", day: P.get("day") || "all", size: +(P.get("size") || 72) };
+const V = { view: P.get("view") || "pictures", hen: P.get("hen") || "all", group: P.get("group") || "clip", show: P.get("show") || "all", day: P.get("day") || "all", size: +(P.get("size") || 72) };
 let D = null, cur = null;
 const save = () => history.replaceState(null, "", "#" + new URLSearchParams(V).toString());
 
@@ -126,6 +138,11 @@ const count = h => D.pieces.filter(p => ofHen(h)(p) && visible(p)).length;
 
 function render() {
   controls();
+  const vb = document.getElementById("viewbtn");
+  vb.textContent = V.view === "sizes" ? "🖼 Back to pictures" : "📏 Sizes";
+  vb.onclick = () => { V.view = V.view === "sizes" ? "pictures" : "sizes"; save(); render(); };
+  document.querySelectorAll("header .row:not(:first-child)").forEach(r => r.style.display = V.view === "sizes" ? "none" : "");
+  if (V.view === "sizes") return renderSizes();
   const hens = V.hen === "all" ? D.hens : [V.hen];
   const ps = D.pieces.filter(visible);
   const n = ps.length, sure = ps.filter(p => p.sure).length;
@@ -194,6 +211,101 @@ function open(i) {
 }
 function close() { cur = null; document.getElementById("pop").style.display = "none"; document.querySelectorAll(".pic.sel").forEach(x => x.classList.remove("sel")); }
 addEventListener("keydown", e => { if (e.key === "Escape") close(); });
+// ---- sizes: how big each hen's box is, by distance from the camera and hen against hen
+let SZ = null;
+async function renderSizes(rebuild) {
+  const main = document.getElementById("main");
+  if (!SZ || rebuild) {
+    main.innerHTML = `<div class="muted" style="padding:14px">${rebuild ? "Learning sizes from your current naming (about 10 s)…" : "loading…"}</div>`;
+    const r = await fetch("sizes", rebuild ? { method: "POST" } : {});
+    SZ = await r.json();
+    if (SZ.error) { main.innerHTML = `<div class="muted" style="padding:14px">${esc(SZ.error)}</div>`; return; }
+  }
+  const C = SZ.cal, hens = Object.keys(C.hens);
+  const built = new Date(C.built * 1000).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  document.getElementById("sub").textContent = `${C.boxes.toLocaleString()} clean boxes of confirmed pieces from ${C.clips} clips · learned ${built}`;
+  main.innerHTML = `<div class="sizes">
+    ${SZ.stale ? `<div class="muted" style="color:#ffb74d">Naming has changed since these sizes were learned.
+       <button class="c" id="rebuild">↻ Update from current naming</button></div>` : `<button class="c" id="rebuild" title="Learn again from your current naming">↻ Update</button>`}
+    <h2>Box size by distance from the camera</h2>
+    <div class="sub">Typical box side (pixels) of each hen, every half metre across the yard. Further away, the same hen looks smaller:
+      box area ∝ (pixels per metre of ground)<sup>${C.b.toFixed(2)}</sup> — plain perspective would be 2.</div>
+    <div class="legend">${hens.map(h => `<span><i style="background:${colour(h)}"></i>${esc(h)}</span>`).join("")}</div>
+    <div class="chart" id="c1"><div id="tip"></div></div>
+    <h2>Hen against hen</h2>
+    <div class="sub">Usual box area of each hen at the same spot, against the average hen (1×). The bar is where half her boxes fall —
+      she stands tall, pecks, turns side-on. The naming checks judge each hen's box against her own size.</div>
+    <div class="chart" id="c2"></div>
+    <h2>The numbers</h2>
+    <table class="num"><tr><th>Hen</th><th>usual size</th><th>half her boxes</th><th>9 in 10 boxes</th><th>boxes measured</th></tr>
+      ${hens.map(h => { const v = C.hens[h]; return `<tr><td><i class="sw" style="border-color:${colour(h)};width:8px;height:8px"></i> ${esc(h)}</td>
+        <td>${v.factor.toFixed(2)}×</td><td>${(v.factor * v.p25).toFixed(2)}–${(v.factor * v.p75).toFixed(2)}×</td>
+        <td>${(v.factor * v.p10).toFixed(2)}–${(v.factor * v.p90).toFixed(2)}×</td><td>${v.boxes.toLocaleString()}</td></tr>`; }).join("")}</table>
+    <div class="sub" style="margin-top:8px">Learned only from boxes you confirmed, not flagged "only part" or "box too big", not overlapping another box,
+      and not cut off by the picture edge. Distance is measured on the ground (patio-slab calibration) from the middle of the picture's bottom edge.</div>
+  </div>`;
+  document.getElementById("rebuild").onclick = () => renderSizes(true);
+  lineChart(document.getElementById("c1"), C, hens);
+  rangeChart(document.getElementById("c2"), C, hens);
+}
+
+function lineChart(box, C, hens) {
+  const W = 1000, H = 380, L = 56, R = 80, T = 14, B = 40;
+  const pts = hens.flatMap(h => C.curve[h].map(([m, side]) => [m, side]));
+  const xmax = Math.ceil(Math.max(...pts.map(p => p[0]))), ymax = Math.ceil(Math.max(...pts.map(p => p[1])) / 20) * 20;
+  const x = m => L + (W - L - R) * m / xmax, y = v => T + (H - T - B) * (1 - v / ymax);
+  let g = `<g class="grid">`;
+  for (let v = 0; v <= ymax; v += 20) g += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+  for (let m = 0; m <= xmax; m += 1) g += `<text x="${x(m)}" y="${H - B + 18}" text-anchor="middle">${m}</text>`;
+  g += `</g><line class="axis" x1="${L}" x2="${W - R}" y1="${y(0)}" y2="${y(0)}"/>
+    <text x="${(L + W - R) / 2}" y="${H - 4}" text-anchor="middle">metres from the near edge of the picture</text>
+    <text transform="translate(14 ${(T + H - B) / 2}) rotate(-90)" text-anchor="middle">box side (px)</text>`;
+  const ends = [];
+  for (const h of hens) {
+    const c = C.curve[h]; if (!c.length) continue;
+    g += `<polyline fill="none" stroke="${colour(h)}" stroke-width="2" stroke-linejoin="round" points="${c.map(([m, v]) => `${x(m)},${y(v)}`).join(" ")}"/>`;
+    const [m, v] = c[c.length - 1]; ends.push([h, x(m), y(v)]);
+  }
+  ends.sort((a, b) => a[2] - b[2]);  // direct labels at line ends, nudged apart
+  for (let i = 1; i < ends.length; i++) if (ends[i][2] - ends[i - 1][2] < 14) ends[i][2] = ends[i - 1][2] + 14;
+  g += ends.map(([h, ex, ey]) => `<text class="lab" x="${ex + 6}" y="${ey + 4}">${esc(h)}</text>`).join("");
+  g += `<line id="xh" y1="${T}" y2="${H - B}" stroke="#777" stroke-width="1" style="display:none"/><rect id="hit" x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent"/>`;
+  box.insertAdjacentHTML("beforeend", `<svg viewBox="0 0 ${W} ${H}">${g}</svg>`);
+  const svg = box.querySelector("svg"), tip = box.querySelector("#tip"), xh = svg.querySelector("#xh");
+  const bins = [...new Set(pts.map(p => p[0]))].sort((a, b) => a - b);
+  svg.querySelector("#hit").onmousemove = e => {
+    const r = svg.getBoundingClientRect(), mx = (e.clientX - r.left) * W / r.width;
+    const m = bins.reduce((a, b) => Math.abs(x(b) - mx) < Math.abs(x(a) - mx) ? b : a);
+    xh.setAttribute("x1", x(m)); xh.setAttribute("x2", x(m)); xh.style.display = "";
+    const rows = hens.map(h => [h, C.curve[h].find(c => c[0] === m)]).filter(([, c]) => c).sort((a, b) => b[1][1] - a[1][1]);
+    tip.innerHTML = `<b>${(m - 0.25).toFixed(1)}–${(m + 0.25).toFixed(1)} m</b><br>` + rows.map(([h, c]) =>
+      `<span style="color:${colour(h)}">━</span> ${esc(h)} ${c[1]} px <span class="muted">(${c[2]} boxes)</span>`).join("<br>");
+    tip.style.display = "block";
+    const px = x(m) * r.width / W; tip.style.left = (px > r.width * 0.6 ? px - tip.offsetWidth - 12 : px + 14) + "px"; tip.style.top = "16px";
+  };
+  svg.querySelector("#hit").onmouseleave = () => { tip.style.display = "none"; xh.style.display = "none"; };
+}
+
+function rangeChart(box, C, hens) {
+  const W = 1000, rowH = 34, L = 90, R = 40, T = 22, B = 30, H = T + B + rowH * hens.length;
+  const vals = hens.flatMap(h => { const v = C.hens[h]; return [v.factor * v.p10, v.factor * v.p90]; });
+  const xmax = Math.ceil(Math.max(...vals) * 4) / 4, x = v => L + (W - L - R) * v / xmax;
+  let g = `<g class="grid">`;
+  for (let v = 0; v <= xmax + 1e-9; v += 0.25) g += `<line x1="${x(v)}" x2="${x(v)}" y1="${T}" y2="${H - B}"/><text x="${x(v)}" y="${H - B + 16}" text-anchor="middle">${v.toFixed(2).replace(/0$/, "")}×</text>`;
+  g += `</g><line x1="${x(1)}" x2="${x(1)}" y1="${T}" y2="${H - B}" stroke="#777" stroke-dasharray="3 3"/>
+    <text x="${x(1)}" y="${T - 8}" text-anchor="middle">average hen</text>`;
+  hens.forEach((h, i) => {
+    const v = C.hens[h], cy = T + rowH * i + rowH / 2, col = colour(h);
+    g += `<g><title>${h}: usual ${v.factor.toFixed(2)}× the average hen · half her boxes ${(v.factor * v.p25).toFixed(2)}–${(v.factor * v.p75).toFixed(2)}× · 9 in 10 ${(v.factor * v.p10).toFixed(2)}–${(v.factor * v.p90).toFixed(2)}×</title>
+      <text class="lab" x="${L - 10}" y="${cy + 4}" text-anchor="end">${esc(h)}</text>
+      <line x1="${x(v.factor * v.p10)}" x2="${x(v.factor * v.p90)}" y1="${cy}" y2="${cy}" stroke="${col}" stroke-width="2" stroke-opacity=".5"/>
+      <rect x="${x(v.factor * v.p25)}" y="${cy - 7}" width="${x(v.factor * v.p75) - x(v.factor * v.p25)}" height="14" rx="4" fill="${col}" fill-opacity=".45"/>
+      <circle cx="${x(v.factor)}" cy="${cy}" r="5" fill="${col}" stroke="#1d1d1d" stroke-width="2"/>
+      <rect x="${L}" y="${cy - rowH / 2}" width="${W - L - R}" height="${rowH}" fill="transparent"/></g>`;
+  });
+  box.insertAdjacentHTML("beforeend", `<svg viewBox="0 0 ${W} ${H}">${g}</svg>`);
+}
+
 load();
 </script>
 </body>

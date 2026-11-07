@@ -539,3 +539,24 @@ def test_resize_handles_cutout_that_crashed_opencv():
     img = np.random.randint(0, 255, (1536, 1920, 3), np.uint8)
     out = I.resize(img[1269:1536, 556:1101], (544, 266))  # this exact cut-out segfaulted cv2.resize
     assert out.shape == (266, 544, 3)
+
+
+def test_to_check_marks_are_asked_even_when_short():
+    fr = lambda s, e, margin=0.5: {"start": s, "end": e, "margin": margin, "own_sim": 0.9, "alt_cluster": None}
+    data = {"fragments": {"1": fr(0, 1), "2": fr(0, 30), "3": fr(40, 41), "4": fr(50, 60, margin=0.0)},
+            "chickens": [{"id": 0, "name": "Salt", "tracks": [1, 2, 3, 4]}], "answers": []}
+    assert [q["track"] for q in I.questions(data)] == [4]  # short pieces were never asked before
+    qs = I.questions(data, extra={1: "seen under 2 s", 2: "recogniser thinks Pepper (90%)"})
+    assert [q["track"] for q in qs] == [2, 4, 1] and qs[0]["why"].startswith("recogniser")
+    data["answers"].append({"track": 1, "chicken": 0, "verdict": "yes"})  # answered: not asked again
+    assert 1 not in [q["track"] for q in I.questions(data, extra={1: "seen under 2 s"})]
+
+
+def test_looks_fine_confirms_the_piece():
+    from chicken_tracker import checks as K
+    data = {"chickens": [{"id": 0, "name": "Monster", "tracks": [5, 6]}], "answers": [], "multiple": [7], "loose": [6]}
+    K.confirm_on_dismiss({"track": 5}, data)
+    K.confirm_on_dismiss({"track": 6}, data)   # keeps her "box too big" flag
+    K.confirm_on_dismiss({"track": 7}, data)   # set aside: stays in its pile, now your answer
+    assert I.confirmed(data) == {5, 6, 7}
+    assert data["loose"] == [6] and data["multiple"] == [7] and 5 in data["chickens"][0]["tracks"]

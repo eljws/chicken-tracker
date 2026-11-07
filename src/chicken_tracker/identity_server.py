@@ -6,6 +6,7 @@ import functools
 import json
 import re
 import threading
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
@@ -260,8 +261,11 @@ def make_handler(run_dir: Path):
             return []
         picks = I.pd.read_csv(store.root / "crops.csv")
         feats = I.np.load(store.root / "features.npy")
+        from . import sizes as SZ
+        from .calibration import load_calibration
+        cal, H = SZ.load(run_dir), load_calibration(run_dir)
         return K.run_checks(store.data, st["det"], I.pd.read_csv(named_p), picks, feats, st["frags"],
-                            store.data["fps"], recog=recog())
+                            store.data["fps"], recog=recog(), sizes=(cal, H) if cal and H is not None else None)
 
     def recog():
         """Recogniser predictions joined to the current pieces; re-joined after cuts."""
@@ -288,6 +292,66 @@ def make_handler(run_dir: Path):
         return {"track": t, "start": f["start"], "duration_s": round(f["end"] - f["start"], 1),
                 "sure": t in I.confirmed(store.data), "strip": I.strip_frames(st["det"], t, STRIP_LEN)}
 
+    CHECK_SHORT_S, CHECK_P, CHECK_SEVERAL_P = 2.0, 0.8, 0.2
+    check_cache: dict = {}
+
+    def to_check() -> dict[int, str]:
+        """{piece: why} for the computer's guesses worth a look: seen under 2 s, the recogniser under
+        80% sure or naming another hen, or giving "several hens" 20%+. Marks only, never a choice."""
+        rec = recog()
+        key = (st["version"], st.get("recog_key"))
+        if check_cache.get("k") == key:
+            return check_cache["v"]
+        d, fr = store.data, store.data["fragments"]
+        done = I.confirmed(d) | I.excluded(d)
+        owner = {t: name_of(c) for t, c in I.chicken_of(d).items()}
+        means = {}
+        if rec:
+            pred, classes = rec
+            cols = [f"p_{k}" for k in classes]
+            clear = pred[pred.crowd <= 0.3] if "crowd" in pred else pred
+            means = {int(t): g.mean() for t, g in clear.groupby("track_id")[cols]}
+            means |= {int(t): g.mean() for t, g in pred.groupby("track_id")[cols] if int(t) not in means}
+        out = {}
+        for t, name in owner.items():
+            if t in done:
+                continue
+            why = []
+            dur = fr[str(t)]["end"] - fr[str(t)]["start"]
+            if dur < CHECK_SHORT_S:
+                why.append(f"very short ({dur:.2f} s)")
+            m = means.get(t)
+            if m is not None:
+                hens = m.drop(f"p_{R.SEVERAL}", errors="ignore")
+                top = hens.idxmax()[2:]
+                own = float(m.get(f"p_{name}", float("nan")))
+                if f"p_{name}" in m and top != name:
+                    why.append(f"recogniser thinks {top} ({hens.max():.0%})")
+                elif own == own and own < CHECK_P:
+                    why.append(f"recogniser only {own:.0%} sure")
+                sev = float(m.get(f"p_{R.SEVERAL}", 0))
+                if sev >= CHECK_SEVERAL_P:
+                    why.append(f"maybe several hens ({sev:.0%})")
+            if why:
+                out[t] = " · ".join(why)
+        check_cache.update(k=key, v=out)
+        return out
+
+    status_last: dict = {}
+
+    def write_status(s: dict) -> None:
+        """identity/status.json: what's waiting on this clip (checks need the page to work them out),
+        for the home page's Naming button. Written only when it changes."""
+        if s == status_last.get("s"):
+            p = store.root / "status.json"
+            if p.exists() and p.stat().st_mtime >= (store.root / "identity.json").stat().st_mtime:
+                return
+        status_last["s"] = dict(s)
+        p = store.root / "status.json"
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({**s, "at": time.time()}))
+        tmp.replace(p)
+
     seen_cache: dict = {}
 
     def seen() -> dict:  # frames each piece has a box in; changes only when pieces are cut or undone
@@ -298,6 +362,7 @@ def make_handler(run_dir: Path):
     def state() -> dict:
         d = store.data
         fr = d["fragments"]
+        chk = to_check()
         chickens = []
         for c in d["chickens"]:
             tr = sorted(c["tracks"], key=lambda t: -fr[str(t)]["n"])
@@ -305,19 +370,25 @@ def make_handler(run_dir: Path):
                 "id": c["id"], "name": c["name"],
                 "minutes": round(sum(fr[str(t)]["end"] - fr[str(t)]["start"] for t in tr) / 60, 1),
                 "fragments": [{"track": t, "crop": mid_crop(t), "sure": t in I.confirmed(d),
-                               "flag": I.box_flag(d, t)} for t in tr],
+                               "flag": I.box_flag(d, t), **({"check": chk[t]} if t in chk else {})} for t in tr],
             })
-        qs = I.questions(d)
+        qs = I.questions(d, extra=chk)
         aside = {reason: [{"track": t, "crop": mid_crop(t)} for t in d.get(key, [])]
                  for reason, key in I.EXCLUDED_KEYS.items()}
+        # pieces in no hen's row and no pile (automatic naming found every hen elsewhere at that time):
+        # shown in their own row so they can be answered, and counted as questions
+        placed = {t for c in d["chickens"] for t in c["tracks"]} | I.excluded(d)
+        unplaced = [{"track": int(t), "crop": mid_crop(int(t))} for t in sorted(fr, key=lambda t: fr[t]["start"])
+                    if int(t) not in placed]
         cf = I.conflicts(d, seen=seen())
         ck = current_checks()
-        return {"chickens": chickens, "aside": aside, "fps": d["fps"], "version": st["version"],
+        write_status({"conflicts": len(cf), "questions": len(qs) + len(unplaced), "checks": len(ck), "to_check": len(chk)})
+        return {"chickens": chickens, "aside": aside, "unplaced": unplaced, "fps": d["fps"], "version": st["version"],
                 "checks": len(ck), "check": _check_view(ck[0]) if ck else None,
                 "check_list": [{k: c[k] for k in ("key", "kind", "title", "seconds")} for c in ck[:40]],
                 "undo": store.history(),
                 "conflicts": len(cf), "conflict": _conflict(cf[0]) if cf else None,
-                "questions": len(qs), "next": _question(qs[0]) if qs else None,
+                "questions": len(qs), "next": _question(qs[0]) if qs else None, "to_check": len(chk),
                 "answered": len(d["answers"])}
 
     def _question(q: dict) -> dict:
@@ -404,13 +475,14 @@ def make_handler(run_dir: Path):
             I.export(run_dir)
             return state()
 
-    def do_apply_check(key: str) -> dict:
+    def do_apply_check(key: str, variant: str | None = None) -> dict:
         with lock:
             check = next((c for c in current_checks() if c["key"] == key), None)
             if check is None:
                 raise ValueError("that check no longer applies")
-            store.snapshot(f"fix: {check['title'][:80]}", with_features=True)
-            st["det"], to_place = K.apply_check(check, store.data, st["det"], run_dir, I.split_piece)
+            fix = check["alt"]["fix"] if variant and check.get("alt", {}).get("variant") == variant else check["fix"]
+            store.snapshot(f"fix: {fix[:80]}", with_features=True)
+            st["det"], to_place = K.apply_check(check, store.data, st["det"], run_dir, I.split_piece, variant=variant)
             st["frags"] = _frags_from(st["det"])
             for t in to_place:
                 I.place_piece(store.data, st["frags"], t)
@@ -424,15 +496,16 @@ def make_handler(run_dir: Path):
         """Marked filmstrip pictures -> cut the piece where the marks change, answer each part."""
         return do_marks([(track, marks)])
 
-    def do_marks(items: list[tuple[int, list[dict]]]) -> dict:
+    def do_marks(items: list[tuple[int, list[dict]]], dismiss: str | None = None) -> dict:
         """Several pieces marked at once (a conflict's A and B): cut each where its marks change and
-        answer every part, as one undo step."""
+        answer every part, as one undo step. `dismiss`: the check these answers settle (from the
+        Checks tab) - closed in the same step, so it can't come back as it was."""
         with lock:
             segs = [(t, *I.mark_segments(st["det"], t, [(m["frame"], m["label"]) for m in marks])) for t, marks in items]
             if not segs:
                 raise ValueError("nothing marked")
             names = {f"c{c['id']}": (c["name"] or f"Chicken {c['id'] + 1}") for c in store.data["chickens"]}
-            words = {"unsure": "can't tell", "not_chicken": "not a chicken", "multiple": "several", **names}
+            words = {"unsure": "can't tell", "not_chicken": "not a chicken", "multiple": "several", "keep": "as it was", **names}
             box = {"partial": " (only part)", "loose": " (box too big)"}
             word = lambda l: words.get(l.split(":")[0], l) + box.get(l.partition(":")[2], "")
             store.snapshot("; ".join(f"marked piece #{t}: " + " | ".join(word(l) for l in labels) for t, _, labels in segs),
@@ -447,12 +520,16 @@ def make_handler(run_dir: Path):
                 owner = I.chicken_of(store.data)
                 for t, lab in zip(pieces, labels):
                     lab, _, flag = lab.partition(":")  # "c3:partial" = hen 3, only part of her / box too big
+                    if lab == "keep":  # unpainted part (checks): cut off, but left as it was - no answer
+                        continue
                     if lab.startswith("c"):
                         c = int(lab[1:])
                         verdict = flag if flag in I.BOX_FLAGS else "yes" if owner.get(t) == c else "moved"
                         I.apply_answer(store.data, t, c, verdict)
                     else:
                         I.apply_answer(store.data, t, None, lab)
+            if dismiss:
+                store.data.setdefault("dismissed_checks", []).append(str(dismiss))
             I.refresh_confidence(store.data, st["frags"])
             st["version"] += 1
             store.save()
@@ -577,17 +654,27 @@ def make_handler(run_dir: Path):
                 if self.path == "/api/isolate":
                     return self._json(do_isolate(int(body["track"]), int(body["other"])))
                 if self.path == "/api/apply_check":
-                    return self._json(do_apply_check(str(body["key"])))
-                if self.path == "/api/dismiss_check":
+                    return self._json(do_apply_check(str(body["key"]), body.get("variant")))
+                if self.path == "/api/dismiss_check":  # "looks fine": your answer for that piece, one undo step
                     k = str(body["key"])
-                    return self._json(mutate(lambda d: d.setdefault("dismissed_checks", []).append(k),
-                                             "check dismissed (looks fine)"))
+                    check = next((c for c in current_checks() if c["key"] == k), None)
+                    said = []
+
+                    def fn(d):
+                        d.setdefault("dismissed_checks", []).append(k)
+                        if check is not None:
+                            said.append(K.confirm_on_dismiss(check, d))
+                    label = "looks fine"
+                    if check is not None:
+                        label += f": {check['title'][:60]}"
+                    return self._json(mutate(fn, label))
                 if self.path == "/api/undo":
                     return self._json(do_undo())
                 if self.path == "/api/mark":
                     return self._json(do_mark(int(body["track"]), list(body["marks"])))
                 if self.path == "/api/marks":  # conflicts: A and B painted, one Apply
-                    return self._json(do_marks([(int(p["track"]), list(p["marks"])) for p in body["pieces"]]))
+                    return self._json(do_marks([(int(p["track"]), list(p["marks"])) for p in body["pieces"]],
+                                               dismiss=body.get("dismiss")))
                 if self.path == "/api/split":
                     return self._json(do_split(int(body["track"]), int(body["frame"])))
             except (KeyError, ValueError, StopIteration) as e:
@@ -597,6 +684,21 @@ def make_handler(run_dir: Path):
                     schedule_dots()  # any change: refresh every hen's dot 1.5 s after the last one
             self._json({"error": "not found"}, 404)
 
+    def reguess(weights: str, version: str | None = None, device: str | None = None) -> dict:
+        """The given recogniser re-guesses the pieces you haven't confirmed (one undo step).
+
+        Slow part (a crop per second through the model) runs outside the lock; the naming page stays
+        usable meanwhile. Answers given during that time are kept: only still-unconfirmed pieces move."""
+        pred, classes = R.predict_run(run_dir, Path(weights), device=device, video=store.data.get("video"))
+        pred = R.load_predictions(run_dir, st["det"])  # joined to the pieces as they are now
+        res = {}
+
+        def fn(d):
+            res.update(R.reguess(d, st["frags"], pred[0], pred[1], weights=weights, version=version))
+        mutate(fn, f"recogniser {version or Path(weights).stem} re-guessed the unconfirmed pieces")
+        return res
+
+    Handler.reguess = staticmethod(reguess)
     return Handler
 
 

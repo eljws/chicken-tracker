@@ -208,7 +208,7 @@ def cmd_models(a: argparse.Namespace) -> None:
 
     if a.use:
         records.use(a.use[0], a.use[1])
-        print(f"Now using {a.use[0]} {a.use[1]}")
+        print(f"Now using {a.use[0]} {records.resolve(a.use[0], a.use[1])}")
     if a.verify:
         bad = records.verify()
         print("\n".join(bad) if bad else "All registered models present and unchanged.")
@@ -225,7 +225,7 @@ def cmd_models(a: argparse.Namespace) -> None:
     for m in rows:
         when = dt.datetime.fromtimestamp(m["created"]).strftime("%Y-%m-%d %H:%M")
         mark = {"current": "● in use", "previous": "○ previous"}.get(m["status"], "  " + m["status"])
-        print(f"{m['kind']:<10} {m['version']:<32} {mark:<12} {when}  from {m['parent'] or '-'}"
+        print(f"{m['kind']:<10} {'v' + str(m['number']):<4} {m['version']:<28} {mark:<12} {when}  from {m['parent'] or '-'}"
               + (f"  {m['note']}" if m["note"] else ""))
 
 
@@ -242,6 +242,17 @@ def cmd_dashboard(a: argparse.Namespace) -> None:
 
     serve(a.out, dataset=a.dataset, port=a.port, open_browser=not a.no_browser, device=a.device,
           public_port=a.public_port)
+
+
+def cmd_sizes(a: argparse.Namespace) -> None:
+    from . import dashboard as D, sizes
+
+    cal = sizes.build(a.out, D.find_runs(a.out))
+    print(f"{cal['boxes']} clean boxes from {cal['clips']} clips -> {a.out / sizes.FILE}")
+    print(f"distance: box area ~ (pixels per metre)^{cal['b']:.2f}")
+    for h, v in cal["hens"].items():
+        print(f"  {h:<8} {v['factor']:.2f}x the average hen  (half her boxes {v['p25']:.2f}-{v['p75']:.2f}x of that, "
+              f"{v['boxes']} boxes)")
 
 
 def cmd_password(a: argparse.Namespace) -> None:
@@ -469,6 +480,11 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("--device", help="for click-to-outline on the labelling page: cpu, mps, 0, ...")
         p.add_argument("--no-browser", action="store_true")
         p.set_defaults(func=cmd_dashboard)
+
+    p = sub.add_parser("sizes", help="learn each hen's usual box size and how it shrinks with distance "
+                                     "(from your confirmed naming; used by the naming checks)")
+    p.add_argument("-o", "--out", type=Path, default=Path("output"))
+    p.set_defaults(func=cmd_sizes)
 
     p = sub.add_parser("password", help="set the login for reaching `home --public-port` from outside")
     p.set_defaults(func=cmd_password)

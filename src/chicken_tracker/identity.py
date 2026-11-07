@@ -430,23 +430,29 @@ def partial(data: dict) -> set[int]:
 
 
 def questions(data: dict, max_margin: float = 0.03, min_sim: float = 0.75,
-              min_duration_s: float = 2.0) -> list[dict]:
-    """Doubtful, unanswered fragments, longest (most valuable) first."""
+              min_duration_s: float = 2.0, extra: dict[int, str] | None = None) -> list[dict]:
+    """Doubtful, unanswered fragments, longest (most valuable) first.
+
+    `extra`: {piece: why} to ask about too, even if short or not doubtful by appearance (the
+    "to check" marks: very short, recogniser unsure or disagreeing). Only asks; never answers.
+    """
+    extra = extra or {}
     done = confirmed(data) | excluded(data)
     asked_no = {(a["track"], a["chicken"]) for a in data["answers"] if a["verdict"] == "no"}
     owner = chicken_of(data)
     qs = []
     for t, f in data["fragments"].items():
         t = int(t)
-        if t in done or t not in owner or f["end"] - f["start"] < min_duration_s:
+        if t in done or t not in owner:
             continue
-        doubtful = f["margin"] < max_margin or f["own_sim"] < min_sim
-        if not doubtful:
+        doubtful = f["end"] - f["start"] >= min_duration_s and (f["margin"] < max_margin or f["own_sim"] < min_sim)
+        if not doubtful and t not in extra:
             continue
         # ask about the current owner first; once rejected, about the best alternative
         for cand in (owner[t], f["alt_cluster"]):
             if cand is not None and (t, cand) not in asked_no and any(c["id"] == cand for c in data["chickens"]):
-                qs.append({"track": t, "chicken": cand, "duration_s": round(f["end"] - f["start"], 1)})
+                qs.append({"track": t, "chicken": cand, "duration_s": round(f["end"] - f["start"], 1),
+                           **({"why": extra[t]} if t in extra else {})})
                 break
     return sorted(qs, key=lambda q: -q["duration_s"])
 
