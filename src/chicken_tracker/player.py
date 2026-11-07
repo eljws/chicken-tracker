@@ -259,6 +259,9 @@ def make_handler(run_dir: Path, video_path: Path, source_video: str | None):
             path = self.path.split("?")[0]
             if path in ("/", "/index.html"):
                 return self._send(page, "text/html; charset=utf-8")
+            if path == "/overlay.js":  # the drawing shared with the Timeline page
+                return self._send((resources.files("chicken_tracker") / "static" / "overlay.js").read_bytes(),
+                                  "text/javascript; charset=utf-8")
             if path == "/overlay.json":
                 return self._send(overlay_bytes(), "application/json")
             if path == "/poses.json":  # skeleton layer: fetched only when switched on
