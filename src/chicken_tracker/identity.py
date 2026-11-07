@@ -26,6 +26,7 @@ import pandas as pd
 
 CROPS_PER_TRACK = 8
 OVERLAP_TOLERANCE_S = 0.5   # tracker may briefly double-track one bird
+SHARED_GAP_S = 0.5  # conflicts: boxes missing for up to this long still count as on screen together
 CONFLICT_MIN_OVERLAP_S = 1.5  # shorter same-name overlaps are tracker hand-overs, not real conflicts
 MAX_SPEED_PX_S = 250.0      # faster than this between fragments = implausible link
 CONTINUITY_TAU_S = 15.0
@@ -450,9 +451,21 @@ def questions(data: dict, max_margin: float = 0.03, min_sim: float = 0.75,
     return sorted(qs, key=lambda q: -q["duration_s"])
 
 
-def conflicts(data: dict, tolerance_s: float = CONFLICT_MIN_OVERLAP_S) -> list[dict]:
-    """Pairs of pieces given the same chicken but visible at the same time (impossible)."""
+def seen_frames(det: pd.DataFrame) -> dict[int, np.ndarray]:
+    """{piece: sorted frames it has a box in} - for conflicts that only count real shared frames."""
+    return {int(t): np.unique(g.to_numpy()) for t, g in det.groupby("track_id").frame}
+
+
+def conflicts(data: dict, tolerance_s: float = CONFLICT_MIN_OVERLAP_S,
+              seen: dict[int, np.ndarray] | None = None) -> list[dict]:
+    """Pairs of pieces given the same chicken but visible at the same time (impossible).
+
+    With `seen` (from seen_frames) only frames where both pieces really have a box count: a piece
+    that loses its hen for a few seconds can have another piece of the same hen inside that gap,
+    which is the same bird filling the hole, not two birds. Without it, start..end spans are used.
+    """
     fr = data["fragments"]
+    fps = data.get("fps", 25.0)
     part = partial(data)  # a partial box next to the full box is one bird boxed twice, not a conflict
     out = []
     for c in data["chickens"]:
@@ -463,9 +476,20 @@ def conflicts(data: dict, tolerance_s: float = CONFLICT_MIN_OVERLAP_S) -> list[d
                 fb = fr[str(b)]
                 if fb["start"] >= fa["end"]:
                     break
-                ov = min(fa["end"], fb["end"]) - fb["start"]
+                if seen is None:
+                    ov = min(fa["end"], fb["end"]) - fb["start"]
+                    if ov > tolerance_s:
+                        out.append({"chicken": c["id"], "a": a, "b": b, "overlap_s": round(ov, 1)})
+                    continue
+                both = np.intersect1d(seen.get(a, np.empty(0)), seen.get(b, np.empty(0)), assume_unique=True)
+                if not len(both):
+                    continue
+                # time together: boxes flicker, so a dropout up to SHARED_GAP_S still counts; a longer
+                # gap (one piece has lost its hen) doesn't
+                ov = float(np.minimum(np.diff(both) / fps, SHARED_GAP_S).sum() + 1 / fps)
                 if ov > tolerance_s:
-                    out.append({"chicken": c["id"], "a": a, "b": b, "overlap_s": round(ov, 1)})
+                    out.append({"chicken": c["id"], "a": a, "b": b, "overlap_s": round(ov, 1),
+                                "from_s": float(both[0]) / fps, "to_s": float(both[-1]) / fps})
     return sorted(out, key=lambda x: -x["overlap_s"])
 
 
@@ -1057,7 +1081,7 @@ def export(run_dir: Path, max_hidden_s: float = 120.0, hidden_tau_s: float = 20.
     summary.to_csv(run_dir / "chickens.csv", index=False, float_format="%.2f")
     if moments:
         pd.DataFrame(moments).to_csv(run_dir / "fast_moments.csv", index=False, float_format="%.2f")
-    open_conflicts = conflicts(data)
+    open_conflicts = conflicts(data, seen=seen_frames(det))
     flagged = [{"track_id": t, "reason": reason, "chicken": ""} for reason, key in EXCLUDED_KEYS.items()
                for t in data.get(key, [])]
     flagged += [{"track_id": t, "reason": f, "chicken": owner.get(t, "")}
@@ -1067,6 +1091,8 @@ def export(run_dir: Path, max_hidden_s: float = 120.0, hidden_tau_s: float = 20.
     from .behaviour import merge_peck_counts
     merge_peck_counts(run_dir)  # keep peck counts when naming edits rebuild chickens.csv
     pd.DataFrame(flagged, columns=["track_id", "reason", "chicken"]).to_csv(run_dir / "flagged_pieces.csv", index=False)
+    # the home page counts conflicts from identity.json alone; this file gives it the frame-exact count
+    (run_dir / "identity" / "conflicts.json").write_text(json.dumps({"conflicts": len(open_conflicts)}))
     return {"chickens": len(summary), "timeline_segments": len(timeline),
             "not_chicken": len(data.get("rejected", [])), "multiple": len(data.get("multiple", [])),
             "unsure": len(data.get("unsure", [])), "conflicts": len(open_conflicts)}

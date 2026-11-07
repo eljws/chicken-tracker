@@ -92,6 +92,9 @@
   .strip .np.painted.bpartial img { outline-style: dashed; } .strip .np.painted.bloose img { outline-style: dotted; }
   body.painting .strip img { cursor: crosshair; }
   .card h3 .rowact { font-size: 12px; padding: 3px 8px; }
+  .paint .pic.ov { box-shadow: inset 0 -5px 0 #ff5252; }
+  .paint .pic.ov::before { content: "both"; position: absolute; top: 0; left: 0; font-size: 10px; padding: 0 4px; background: #ff5252; color: #fff;
+                           border-radius: 0 0 4px 0; line-height: 1.4; z-index: 1; }
   #zoom { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.75); z-index: 50; align-items: center; justify-content: center; }
   #zoom .zbox { background: #1d1d1d; border: 1px solid #444; border-radius: 8px; padding: 12px; max-width: 96vw; overflow-x: auto; }
   #zoom h3 { display: flex; gap: 10px; align-items: center; margin: 0 0 8px; }
@@ -101,7 +104,7 @@
 </head>
 <body>
 <header>
-  <button class="tab on" data-tab="name">1 · Name &amp; merge</button>
+  <button class="tab on" data-tab="name">1 · Name &amp; merge <span id="namecount"></span></button>
   <button class="tab" data-tab="ask">2 · Questions <span id="qcount"></span></button>
   <button class="tab" data-tab="conflicts">3 · Conflicts <span id="ccount"></span></button>
   <button class="tab" data-tab="checks">4 · Checks <span id="kcount"></span></button>
@@ -174,6 +177,12 @@ function toast(m, ms = 1400) { const t = $("#toast"); t.textContent = m; t.style
 
 function render() {
   $("#qcount").textContent = `(${S.questions})`;
+  {  // pictures you've confirmed (or set aside) out of all of them
+    const all = S.chickens.flatMap(c => c.fragments), aside = Object.values(S.aside).reduce((n, a) => n + a.length, 0);
+    const done = all.filter(f => f.sure).length + aside, total = all.length + aside, nc = $("#namecount");
+    nc.innerHTML = done === total ? `<b style="color:#81c784">(${done}/${total} ✓)</b>` : `(${done}/${total})`;
+    nc.parentElement.title = `${done} of ${total} pieces confirmed by you or set aside · ${total - done} still the computer's guess`;
+  }
   const u = $("#undo");
   u.disabled = !S.undo.count;
   u.title = S.undo.count ? `Undo: ${S.undo.label}  (⌘Z · ${S.undo.count} steps saved)` : "Nothing to undo";
@@ -659,18 +668,35 @@ function renderConflicts() {
       ${q.overlap_s}s — one bird can't be in two places. Say what each piece really is; fixing either one resolves it.
       (${S.conflicts} conflicts left, biggest first)<br>
       If only <b>part</b> of a long piece is the problem, use <b>✂ cut out just the overlap</b> and label that bit.
-      To cut elsewhere, click a <b>✂</b> in the filmstrip — it cuts <i>at the frame to its right</i>. If one box shows <b>only part</b> of the bird (head, half behind something) while the
+      Or <b>paint</b>: pick a brush below, click or drag across the pictures of A or B (red "both" = on screen together),
+      then <b>Apply</b> — each piece is cut where your paint changes and every part labelled. Unpainted pictures of a painted piece stay ${esc(q.name)}.
+      If one box shows <b>only part</b> of the bird (head, half behind something) while the
       other shows all of it, mark it <b>◐ only part of</b>; if a box is mostly that bird but also catches a bit of a
       neighbour, mark it <b>◑ box too big</b>. Either way it's one bird boxed twice, not a conflict.</div>
     <div class="card"><h3>Same moment, same camera frame <span class="meta">— start, middle and end of the overlap</span></h3>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">${[0, 1, 2].map(k =>
         `<img src="snap/${q.a}/${q.b}/${k}.jpg" style="width:100%;border-radius:6px;background:#000;min-height:120px">`).join("")}</div>
     </div>
+    <div class="npal" id="cpal">
+      <div class="brushes"><span class="lbl">Bird</span>${S.chickens.map((c, i) =>
+        `<button class="act brush" data-b="c${c.id}" style="--bc:${markColour(`c${c.id}`)}">${esc(label(c))}${i < 9 ? `<kbd>${i + 1}</kbd>` : ""}</button>`).join("")}
+        ${[["unsure", "can't tell"], ["not_chicken", "not a chicken"], ["multiple", "several"]].map(([k, n]) =>
+        `<button class="act brush" data-b="${k}" style="--bc:${markColour(k)}">${esc(n)}</button>`).join("")}</div>
+      <div class="brushes"><span class="lbl">Box</span>
+        <button class="act brush box" data-b="box:partial" style="--bc:#bbb" title="Only part of the hen is in the picture">◐ only part of her</button>
+        <button class="act brush box" data-b="box:loose" style="--bc:#bbb" title="Mostly her, but the box catches a bit of a neighbour">◑ box too big</button>
+        <span class="meta" style="align-self:center;margin-left:8px">pick a brush, click or drag across pictures of A or B · click a painted one again to unpaint · <kbd>Esc</kbd> put the brush down</span></div>
+      <div class="answers" id="cbar" style="display:none;margin:4px 0 0">
+        <button class="act yes" id="capply">✓ Apply <kbd>Enter</kbd></button><span class="meta" id="cplan"></span>
+        <button class="act" id="cclear">clear paint</button></div></div>
     <div>${q.pieces.map((p, i) => `
       <div class="card" style="border-color:${i ? "#ffdc00" : "#00dcff"}"><h3>
         <span style="color:${i ? "#ffdc00" : "#00dcff"};font-weight:700;font-size:20px">${i ? "B" : "A"}</span> piece #${p.track} <span class="meta">${p.duration_s}s from ${clock(p.start)}
-        ${p.sure ? " · ✓ confirmed" : ""}</span></h3>
-        ${film(p)}
+        ${p.sure ? " · ✓ confirmed" : ""}</span>
+        <button class="act rowact" data-pov="${p.track}" title="Paint the pictures where both are on screen with the brush">🖌 paint the overlap</button>
+        <button class="act rowact" data-pall="${p.track}" title="Paint every picture of this piece with the brush">🖌 paint all</button></h3>
+        <div class="film paint" data-t="${p.track}">${p.strip.map(f => `<div class="pic ${(f + 0.5) / S.fps >= q.overlap_from && (f - 0.5) / S.fps <= q.overlap_to ? "ov" : ""}"
+          data-f="${f}" title="${clockOf(f / S.fps)}"><img src="strip/${p.track}/${f}.jpg?v=${S.version}" draggable="false" style="height:110px"><span class="tag"></span></div>`).join("")}</div>
         ${p.can_isolate ? `<button class="act" data-iso="${p.track}" data-other="${p.other}" style="border-color:#ffc107">
           ✂ cut out just the overlap (${clockOf(q.overlap_from)}–${clockOf(q.overlap_to)}) — then label that bit</button>` : ""}
         <div class="answers">
@@ -690,8 +716,71 @@ function renderConflicts() {
     await api("api/isolate", { track: +b.dataset.iso, other: +b.dataset.other });
     toast("Done ✂ — now label the overlapping bit");
   });
-  bindCuts();
+  bindConflictPaint(q);
 }
+
+// Conflicts: one brush, two filmstrips (A and B). Apply = cut each painted piece where the paint changes, label
+// every part (one undo step). A piece with no paint is left alone; its unpainted pictures stay the conflict's hen.
+let CP = null, cpDrag = false;
+window.addEventListener("pointerup", () => { cpDrag = false; });
+function bindConflictPaint(q) {
+  const key = `${q.a}:${q.b}:${S.version}`;
+  if (!CP || CP.key !== key) CP = { key, brush: CP ? CP.brush : null, marks: {}, boxm: {} };
+  const base = `c${q.chicken}`;
+  const strips = [...document.querySelectorAll("#main .film.paint")];
+  const L = (t, lay) => (CP[lay][t] = CP[lay][t] || {});
+  const final = (t, f) => { const h = L(t, "marks")[f] || base, b = L(t, "boxm")[f];
+    return h.startsWith("c") && b ? `${h}:${b}` : h; };
+  const painted = t => Object.keys(L(t, "marks")).length + Object.keys(L(t, "boxm")).length > 0;
+  const show = () => {
+    document.querySelectorAll("#cpal .brush").forEach(x => x.classList.toggle("on", x.dataset.b === CP.brush));
+    document.body.classList.toggle("painting", !!CP.brush);
+    const plan = [];
+    strips.forEach((st, i) => { const t = st.dataset.t, pics = [...st.querySelectorAll(".pic")];
+      pics.forEach(p => { const f = p.dataset.f, m = L(t, "marks")[f], b = L(t, "boxm")[f], on = !!(m || b);
+        p.classList.toggle("marked", on);
+        p.classList.toggle("bpartial", b === "partial"); p.classList.toggle("bloose", b === "loose");
+        p.style.setProperty("--mc", on ? markColour(m || base) : "transparent");
+        p.querySelector(".tag").textContent = on ? markName(final(t, f)) : ""; });
+      if (!painted(t)) return;
+      const seq = pics.map(p => final(t, p.dataset.f)), parts = seq.filter((k, j) => !j || k !== seq[j - 1]);
+      plan.push(`${i ? "B" : "A"}: ${parts.length > 1 ? `cut into ${parts.length} — ` : ""}${parts.map(markName).join(" | ")}`); });
+    $("#cbar").style.display = plan.length ? "flex" : "none";
+    $("#cplan").textContent = "→ " + plan.join("   ·   ");
+  };
+  const set = (t, f, toggle) => { if (!CP.brush) return toast("First pick a brush (the buttons above the pictures)");
+    const lay = L(t, CP.brush.startsWith("box:") ? "boxm" : "marks"), v = CP.brush.replace("box:", "");
+    if (toggle && lay[f] === v) delete lay[f]; else lay[f] = v; };
+  document.querySelectorAll("#cpal .brush").forEach(b => b.onclick = () => { CP.brush = CP.brush === b.dataset.b ? null : b.dataset.b; show(); });
+  strips.forEach(st => st.querySelectorAll(".pic").forEach(p => {
+    p.onpointerdown = e => { e.preventDefault(); cpDrag = true; set(st.dataset.t, p.dataset.f, true); show(); };
+    p.onpointerenter = () => { if (cpDrag && CP.brush) { set(st.dataset.t, p.dataset.f, false); show(); } };
+  }));
+  const paintSome = (t, sel) => { if (!CP.brush) return toast("First pick a brush");
+    document.querySelectorAll(`#main .film.paint[data-t="${t}"] .pic${sel}`).forEach(p => set(t, p.dataset.f, false)); show(); };
+  document.querySelectorAll("[data-pov]").forEach(b => b.onclick = () => paintSome(b.dataset.pov, ".ov"));
+  document.querySelectorAll("[data-pall]").forEach(b => b.onclick = () => paintSome(b.dataset.pall, ""));
+  CP.apply = async () => {
+    const pieces = strips.filter(st => painted(st.dataset.t)).map(st => ({ track: +st.dataset.t,
+      marks: [...st.querySelectorAll(".pic")].map(p => ({ frame: +p.dataset.f, label: final(st.dataset.t, p.dataset.f) })) }));
+    if (!pieces.length) return;
+    if (cutting) return toast("Still working — one moment…");
+    cutting = true; toast("Cutting and labelling…", 60000);
+    try { if (await api("api/marks", { pieces })) toast("Done ✓ — ⌘Z undoes it", 2000); }
+    finally { cutting = false; }
+  };
+  $("#capply").onclick = CP.apply;
+  $("#cclear").onclick = () => { CP.marks = {}; CP.boxm = {}; show(); };
+  show();
+}
+window.addEventListener("keydown", e => {
+  if (tab !== "conflicts" || !CP || !S.conflict || e.metaKey || e.ctrlKey || ["INPUT", "SELECT"].includes(e.target.tagName)) return;
+  const z = $("#zoom"); if (z && z.style.display === "flex") return;
+  if (e.key === "Escape") { CP.brush = null; return render(); }
+  if (e.key === "Enter") { e.preventDefault(); return CP.apply && CP.apply(); }
+  const i = "123456789".indexOf(e.key);
+  if (i >= 0 && S.chickens[i]) { const k = `c${S.chickens[i].id}`; CP.brush = CP.brush === k ? null : k; render(); }
+});
 
 let selCheck = null;
 async function renderChecks() {
