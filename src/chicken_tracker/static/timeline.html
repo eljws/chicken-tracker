@@ -124,7 +124,7 @@
   <div id="hens"></div>
   <h2>Events this day</h2>
   <div class="row" style="margin-bottom:4px"><select id="evfilter">
-    <option value="all">everything</option><option value="illegal">⚠ illegal moves</option><option value="run">🏃 fast runs</option>
+    <option value="all">everything</option><option value="illegal">⚠ illegal moves</option><option value="run">🏃 fast runs</option><option value="rodent">🐀 rats & animals</option>
     <option value="marker">☀🌙 dawn / dusk</option></select>
     <select id="evsort" title="Order of the list"><option value="time">in time order</option><option value="speed">fastest first</option></select>
     <label class="muted"><input type="checkbox" id="evhen"> only the chosen hen</label></div>
@@ -172,7 +172,7 @@ function pickDay(i, at) {
   $("#dayinfo").textContent = `${hm(DAY.s)} → ${hm(DAY.e)}${DAY.complete ? "" : " · part"}`;
   $("#marks").innerHTML = dayMarkers().map(m => `<button data-at="${m.at}" title="${m.kind}">${m.kind === "dawn" ? "☀" : "🌙"} ${hm(ms(m.at))}</button>`).join(" ");
   document.querySelectorAll("#marks button").forEach(b => b.onclick = () => seekWall(ms(b.dataset.at)));
-  drawBar(); loadHens();
+  drawBar(); loadHens(); loadRodents();
   seekWall(at && at >= DAY.s && at < DAY.e ? at : (DAY.dawn ? ms(DAY.dawn) : DAY.s));
 }
 const dayMarkers = () => TL.markers.filter(m => ms(m.at) >= DAY.s && ms(m.at) <= DAY.e);
@@ -303,11 +303,13 @@ const LAYERS = [["boxes", "Boxes & names", "B", true], ["trails", "Trails (last 
   ["skeletons", "Skeletons", "K", false], ["dots", "Pixel-following dots", "D", false], ["hidden", "Hidden-hen markers", "I", true],
   ["groups", '"2+ chickens" boxes', "G", true], ["stations", "Feeder & water", "S", false]];
 const layers = Object.fromEntries(LAYERS.map(([k, , , d]) => [k, recall("layer." + k, d)]));
-let showHens = recall("hens", true);
+let showHens = recall("hens", true), showRod = recall("rodents", true), RV = null;
+function setRod(on) { showRod = on; store("rodents", on); layersPanel(); drawBar(); drawHead(); events(true); draw(); }
 function layersPanel() {
   $("#layers").innerHTML = `<label class="lay"><input type="checkbox" id="lall" ${showHens ? "checked" : ""}> <b>Hens on the video</b><kbd>O</kbd></label>` +
     LAYERS.map(([k, n, key]) => `<label class="lay" style="padding-left:18px"><input type="checkbox" data-l="${k}" ${layers[k] ? "checked" : ""}> ${n}<kbd>${key}</kbd></label>`).join("") +
-    `<label class="lay off" title="Comes with the rodent detector"><input type="checkbox" disabled> 🐀 Rodents <span class="muted">(coming)</span></label>`;
+    `<label class="lay" title="Night movers from the Rodents page: rats in red, other animals purple, unsure grey (sorted on the Rodents page)"><input type="checkbox" id="lrod" ${showRod ? "checked" : ""}> <b>🐀 Rodents</b>${RV ? ` <span class="muted">${RV.events.filter(e => e.label === "rat").length} rats this day</span>` : ""}<kbd>R</kbd></label>`;
+  $("#lrod").onchange = e => setRod(e.target.checked);
   $("#lall").onchange = e => { showHens = e.target.checked; store("hens", showHens); draw(); };
   document.querySelectorAll("#layers input[data-l]").forEach(cb => cb.onchange = () => setLayer(cb.dataset.l, cb.checked));
 }
@@ -338,6 +340,7 @@ function draw() {
   const c = cur && cur.run ? clipData(cur.run) : null;
   $("#npnote").style.display = cur && !cur.run && showHens ? "block" : "none";
   drawMini();
+  drawRodents(ctx, r);
   if (!c || !c.D || !showHens) return;
   const D = c.D, v = V(), frame = Math.round(v.currentTime * D.fps);
   if (c.DT && !c.DT.ci) c.DT.ci = Object.fromEntries(D.chickens.map((h, i) => [h.name, i]));
@@ -352,6 +355,43 @@ function draw() {
                              warnY: warnLine() * r, warnX: R.L * r });
   ctx.restore();
   D.chickens.forEach((h, i) => lastStatus[h.name] = res.status[i]);
+}
+// ================================================================ rodents (night movers, labelled on the Rodents page)
+var ROD = { rat: ["#ff5252", "🐀 rat"], other_animal: ["#b388ff", "🦊 animal"], unsure: ["#bdbdbd", "? unsure"], null: ["#9e9e9e", "mover"] };
+const rodShown = e => e.label === "rat" || e.label === "other_animal" || e.label === "unsure";  // not the unsorted movers: mostly bugs and noise
+async function loadRodents() {
+  const day = DAY.day; RV = null;
+  const j = await (await fetch(`rodents?day=${encodeURIComponent(day)}`)).json().catch(() => null);
+  if (!j || !DAY || DAY.day !== day) return;
+  j.events.forEach(e => { e.s = ms(e.start) + e.t0 * 1000; e.e = ms(e.start) + e.t1 * 1000; });
+  RV = j; layersPanel(); drawBar(); drawHead(); events(true); draw();
+}
+function drawRodents(ctx, r) {
+  if (!showRod || !RV || !cur) return;
+  const now = RV.events.filter(e => rodShown(e) && wall >= e.s - 1500 && wall <= e.e + 1500);
+  if (!now.length) return;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(R.L * r, R.T * r, R.w * r, R.h * r); ctx.clip();
+  ctx.setTransform(Z, 0, 0, Z, (R.L + TX) * r, (R.T + TY) * r);
+  const sx = R.w * r / RV.frame[0], sy = R.h * r / RV.frame[1], u = Math.max(1, Math.min(r, R.w * r / 900)) / Z;
+  for (const e of now) {
+    // where it is now: between the two scanned spots either side (they're ~1 s apart)
+    const t = (wall - ms(e.start)) / 1000, P = e.pts;
+    let i = P.findIndex(p => p.t >= t); if (i < 0) i = P.length - 1;
+    const a = P[Math.max(0, i - 1)], b = P[i], k = b.t > a.t ? Math.min(1, Math.max(0, (t - a.t) / (b.t - a.t))) : 0;
+    const box = a.box.map((v, j) => v + (b.box[j] - v) * k);
+    const pad = 6, x1 = (box[0] - pad) * sx, y1 = (box[1] - pad) * sy, x2 = (box[2] + pad) * sx, y2 = (box[3] + pad) * sy;
+    const [col, name] = ROD[e.label] || ROD.null;
+    ctx.strokeStyle = col; ctx.lineWidth = 2.5 * u; ctx.setLineDash(e.label === "rat" ? [] : [6 * u, 4 * u]);
+    ctx.beginPath(); ctx.arc((x1 + x2) / 2, (y1 + y2) / 2, Math.max(x2 - x1, y2 - y1) / 2 + 6 * u, 0, 2 * Math.PI); ctx.stroke();
+    ctx.setLineDash([]);
+    const label = name + (e.by === "claude" ? " 🤖" : "");
+    ctx.font = `600 ${13 * u}px system-ui`; const tw = ctx.measureText(label).width;
+    const lx = (x1 + x2) / 2 - tw / 2, ly = y1 - 10 * u;
+    ctx.fillStyle = "rgba(0,0,0,.7)"; ctx.fillRect(lx - 4 * u, ly - 13 * u, tw + 8 * u, 17 * u);
+    ctx.fillStyle = col; ctx.fillText(label, lx, ly);
+  }
+  ctx.restore();
 }
 function warnLine() {  // illegal-move notes: just above the bottom dock while it shows, else at the video's bottom
   const bottom = R.T + R.h, dock = $("#dock").getBoundingClientRect().top - stage.getBoundingClientRect().top;
@@ -408,6 +448,8 @@ function allEvents() {
   const out = dayMarkers().map(m => ({ kind: "marker", t: ms(m.at), text: m.kind === "dawn" ? "☀ dawn — colour" : "🌙 dusk — infrared" }));
   if (HV) for (const c of HV.clips) for (const e of c.events) out.push({ kind: e.kind, hen: e.hen, t: c.s + e.t * 1000, text: (e.kind === "illegal" ? "⚠ " : "🏃 ") + e.detail,
     speed: e.kind === "run" ? (e.speed != null ? e.speed : +((e.detail.match(/([\d.]+) m\/s/) || [])[1] || 0)) : null });
+  if (showRod && RV) for (const e of RV.events) if (e.label === "rat" || e.label === "other_animal")
+    out.push({ kind: "rodent", t: e.s, text: `${ROD[e.label][1]}${e.by === "claude" ? " 🤖" : ""} · ${Math.round((e.e - e.s) / 1000) || 1} s` });
   return out.sort((a, b) => a.t - b.t);
 }
 function events(force) {
@@ -468,6 +510,11 @@ function drawBar() {
     cx.fillStyle = m.kind === "dawn" ? "#ffd54f" : "#9fa8da"; cx.fillRect(x - r, top - 2 * r, 2 * r, h + 4 * r);
     cx.textAlign = x < 40 * r ? "left" : x > W_ - 40 * r ? "right" : "center"; cx.font = `600 ${11 * r}px system-ui`;
     cx.fillText(`${m.kind === "dawn" ? "☀" : "🌙"} ${hm(ms(m.at))}`, x, top + h / 2 + 4 * r);
+  }
+  if (showRod && RV) for (const e of RV.events) {
+    if (e.label !== "rat" && e.label !== "other_animal") continue;
+    cx.fillStyle = ROD[e.label][0]; const x = xOf(e.s);
+    cx.fillRect(x - r, top + h - 7 * r, Math.max(2 * r, xOf(e.e) - x), 7 * r);
   }
   barBase = cx.getImageData(0, 0, W_, H);
 }
@@ -594,6 +641,7 @@ addEventListener("keydown", e => {
   else if (k === "l") togglePanel();
   else if (k === "h") $("#brows").click();
   else if (k === "o") { showHens = !showHens; store("hens", showHens); layersPanel(); draw(); }
+  else if (k === "r") setRod(!showRod);
   else if (k === "0") { Z = 1; TX = TY = 0; follow = false; applyZoom(); hensPanel(); }
   else if (e.key === "Escape") { if (focusName) setFocus(null); else if (document.body.classList.contains("panel")) togglePanel(); }
   else if (LKEY[k]) setLayer(LKEY[k], !layers[LKEY[k]]);

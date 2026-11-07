@@ -367,6 +367,18 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
             if path == "/timeline/overlay.js":
                 return self._send((resources.files("chicken_tracker") / "static" / "overlay.js").read_bytes(),
                                   "text/javascript; charset=utf-8")
+            if path == "/timeline/rodents":  # night movers of one dawn-to-dawn day, with their labels, for the 🐀 layer
+                from urllib.parse import parse_qs
+                from . import rodents as RD
+                from . import timeline as TL
+                day = (parse_qs(query).get("day") or [""])[0]
+                tl, lab, out = TL.load(root), RD.labels(root), []
+                for e in RD.events(root):
+                    if tl and TL.day_of(tl, RD.when(e)) == day:
+                        l = lab.get(e["id"], {})
+                        out.append({"id": e["id"], "start": e["start"], "t0": e["t0"], "t1": e["t1"], "pts": e["pts"],
+                                    "label": l.get("label"), "by": l.get("by")})
+                return self._send(json.dumps({"events": out, "frame": [640, 512]}).encode(), "application/json")
             if path == "/timeline/hens":  # the hens of every processed clip of one dawn-to-dawn day
                 from urllib.parse import parse_qs
                 from . import timeline as TL
