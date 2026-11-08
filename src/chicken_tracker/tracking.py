@@ -43,6 +43,9 @@ class TrackConfig:
     scan_imgsz: int = 640      # ... at low detail ...
     scan_conf: float = 0.15    # ... with a low bar (a hen missed in one look is caught in the next)
     scan_pad_s: float = 5.0    # track from this long before a hen is first seen to this long after
+    engine: str = "auto"       # tracking detector on: "neural" (Neural Engine, Core ML), "gpu", or "auto" = neural if it checks out
+    engine_model: str = ""     # the Core ML model when engine == "neural" (filled in by neural.prepare)
+    engine_imgsz: list[int] | None = None  # its fixed input (h, w)
 
 
 @dataclass
@@ -144,12 +147,19 @@ def track_video(
     from ultralytics import YOLO  # heavy import, keep lazy
 
     info = probe_video(path)
+    if cfg.engine == "auto":
+        from .neural import prepare
+        cfg = prepare(cfg, path, info.width, info.height)
     model = YOLO(cfg.model)
+    tmodel, tkw = model, dict(imgsz=cfg.imgsz, device=cfg.device)   # the model that tracks (the quick scan stays on `model`)
+    if cfg.engine == "neural":
+        tmodel, tkw = YOLO(cfg.engine_model, task="detect"), dict(imgsz=cfg.engine_imgsz)
     classes = resolve_classes(model.names, cfg.classes)
     if progress:
         label = [model.names[c] for c in classes] if classes is not None else "all"
         print(f"[{Path(path).name}] {info.width}x{info.height} @ {info.fps:.1f}fps, "
-              f"{info.frame_count} frames; tracking classes: {label}")
+              f"{info.frame_count} frames; tracking classes: {label}; detector on the "
+              f"{'Neural Engine' if cfg.engine == 'neural' else 'GPU'}")
 
     writer = None
     if annotated_out is not None:
@@ -161,12 +171,12 @@ def track_video(
     rows: list[tuple] = []
     if cfg.skip_empty and cfg.vid_stride == 1:
         try:
-            _track_segments(path, model, cfg, info, classes, rows, writer, on_frame, progress)
+            _track_segments(path, model, tmodel, tkw, cfg, info, classes, rows, writer, on_frame, progress)
         finally:
             if writer is not None:
                 writer.release()
         return drop_container_boxes(pd.DataFrame(rows, columns=DETECTION_COLUMNS)), info
-    results = model.track(
+    results = tmodel.track(
         source=str(path),
         stream=True,
         persist=True,
@@ -174,10 +184,9 @@ def track_video(
         classes=classes,
         conf=cfg.conf,
         iou=cfg.iou,
-        imgsz=cfg.imgsz,
         vid_stride=cfg.vid_stride,
-        device=cfg.device,
         verbose=False,
+        **tkw,
     )
     try:
         for i, r in enumerate(results):
@@ -208,7 +217,7 @@ def track_video(
     return drop_container_boxes(pd.DataFrame(rows, columns=DETECTION_COLUMNS)), info
 
 
-def _track_segments(path, model, cfg, info, classes, rows, writer, on_frame, progress) -> None:
+def _track_segments(path, model, tmodel, tkw, cfg, info, classes, rows, writer, on_frame, progress) -> None:
     """Scan, then track only the stretches with hens. The tracker restarts in each stretch;
     its ids are offset so pieces from different stretches never share an id."""
     phase = {"name": "scan"}
@@ -237,8 +246,8 @@ def _track_segments(path, model, cfg, info, classes, rows, writer, on_frame, pro
             ok, img = cap.read()
             if not ok:
                 break
-            r = model.track(img, persist=f != a, tracker=cfg.tracker, classes=classes, conf=cfg.conf,
-                            iou=cfg.iou, imgsz=cfg.imgsz, device=cfg.device, verbose=False)[0]
+            r = tmodel.track(img, persist=f != a, tracker=cfg.tracker, classes=classes, conf=cfg.conf,
+                             iou=cfg.iou, verbose=False, **tkw)[0]
             t = f / info.fps
             boxes = r.boxes
             if boxes is not None and boxes.id is not None:

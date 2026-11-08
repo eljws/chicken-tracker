@@ -7,6 +7,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "coremltools>=9.0 ; sys_platform == 'darwin'",
     "imageio-ffmpeg>=0.8.0",
     "lap>=0.5.13",
     "numpy>=2.4.6",

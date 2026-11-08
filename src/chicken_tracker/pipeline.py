@@ -44,6 +44,13 @@ def process_video(video: Path, out_root: Path, track_cfg: TrackConfig, zones: Zo
     from .progress import Progress
 
     with Progress(out_dir, "detect") as p:
+        if track_cfg.engine == "auto":   # pick GPU or Neural Engine now, so meta.json records which ran
+            from .neural import prepare
+            from .tracking import probe_video
+            p.update(0, 1, phase="getting the Neural Engine detector ready")
+            v = probe_video(video)
+            track_cfg = prepare(track_cfg, video, v.width, v.height)
+
         def on_frame(f, total, r, phase="track"):
             label = "quick scan for hens (once a second)" if phase == "scan" else (
                 "tracking the stretches with hens" if track_cfg.skip_empty else "")
