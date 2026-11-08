@@ -53,7 +53,7 @@ def cmd_process(a: argparse.Namespace) -> None:
     from .records import model_or
 
     cfg = TrackConfig(model=model_or("detector", a.model, "yolo11s.pt"), conf=a.conf, imgsz=a.imgsz, vid_stride=a.stride,
-                      device=a.device, classes=a.classes, skip_empty=a.skip_empty)
+                      device=a.device, classes=a.classes, skip_empty=a.skip_empty, engine=a.engine)
     if a.tracker:
         cfg.tracker = a.tracker
     zones = load_zones(a.zones)
@@ -351,6 +351,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--stride", type=int, default=1, help="process every Nth frame (faster)")
     p.add_argument("--device", help="cpu, mps, 0, ...")
     p.add_argument("--tracker", help="custom tracker YAML (default: bundled chicken_botsort.yaml)")
+    p.add_argument("--engine", choices=["auto", "neural", "gpu"], default="auto",
+                   help="where the detector runs while tracking: the Mac's Neural Engine (same boxes, ~2x faster; "
+                        "converted and checked once per detector) or the GPU. auto = Neural Engine if it checks out")
     p.add_argument("--save-video", action="store_true", help="write annotated.mp4 with IDs")
     p.add_argument("--skip-empty", action="store_true",
                    help="quick scan once a second first; track only the stretches with hens in view")
