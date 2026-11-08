@@ -43,6 +43,19 @@ def browser_video(run: Path) -> Path | None:
     return vids[0] if vids else None
 
 
+def player_video(run: Path, root: Path) -> Path | None:
+    """What the player plays: the small browser copy, else the recording itself (H.264 the browser plays
+    as it is - so a copy of the output without the browser copies, e.g. on the Pi, still has a player)."""
+    v = browser_video(run)
+    if v is not None:
+        return v
+    from . import timeline as TL
+    try:
+        return TL.locate(json.loads((run / "meta.json").read_text())["video"]["path"], root)
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def _naming_counts(run: Path) -> dict | None:
     p = run / "identity" / "identity.json"
     if not p.exists():
@@ -74,7 +87,7 @@ def run_card(root: Path, run: Path) -> dict:
     pic = next((p for p in (run / "preview" / "detect.jpg", run / "heatmap.png") if p.exists()), None)
     s.update({
         "links": {
-            "player": base + "player/" if browser_video(run) else None,
+            "player": base + "player/" if player_video(run, root) else None,
             "naming": base + "naming/" if (run / "identity" / "identity.json").exists() else None,
             "clips": base + "clips/" if (run / "identity" / "clips" / "index.html").exists() else None,
         },
@@ -191,7 +204,7 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
                 from . import player
 
                 meta = json.loads((run / "meta.json").read_text())
-                return player.make_handler(run, browser_video(run), meta["video"]["path"])
+                return player.make_handler(run, player_video(run, root), meta["video"]["path"])
             if app == "naming":
                 from . import identity_server
 
@@ -389,7 +402,8 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
                 from . import timeline as TL
                 tl = TL.load(root) or {"clips": []}
                 c = next((c for c in tl["clips"] if c["rel"] == f"{m[1]}/{m[2]}"), None)
-                return self._file(Path(c["path"])) if c and Path(c["path"]).is_file() else self._send(b"not found", "text/plain", 404)
+                p = TL.locate(c["path"], root) if c else None
+                return self._file(p) if p else self._send(b"not found", "text/plain", 404)
             if path == "/hens":
                 return self._redirect(f"/hens/{q}")
             if path == "/hens/":
@@ -441,9 +455,9 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
                     if d not in p.parents or not p.is_file():
                         return self._send(b"not found", "text/plain", 404)
                     return self._file(p)
-                if app == "player" and browser_video(run) is None:
-                    return self._send(b"No browser copy of this video yet: run "
-                                      b"`chicken-tracker player RUN --encode-only`.", "text/plain", 404)
+                if app == "player" and player_video(run, root) is None:
+                    return self._send(b"Neither a browser copy nor the recording of this clip is here.",
+                                      "text/plain", 404)
                 if app == "naming" and not (run / "identity" / "identity.json").exists():
                     return self._send(b"Not named yet: run `chicken-tracker identify RUN`.", "text/plain", 404)
                 return self._delegate(run_app(run, app), rest + q)

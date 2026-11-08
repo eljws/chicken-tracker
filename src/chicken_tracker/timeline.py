@@ -45,15 +45,35 @@ _scan = {"running": False, "done": 0, "total": 0, "error": None}
 
 
 # ------------------------------------------------------------------ finding the recordings
+def locate(path, root: Path | None = None) -> Path | None:
+    """A recording on this machine. Paths are saved as they were where the clip was processed; when the
+    output folder was copied to another machine (the Pi), the same <device>/<date>/<file> is looked for
+    in a videos/ or downloads/ folder beside the output folder."""
+    if not path:
+        return None
+    p = Path(path)
+    if p.is_file():
+        return p
+    if root is None or len(p.parts) < 3:
+        return None
+    tail = Path(*p.parts[-3:])
+    out = Path(root)
+    for base in dict.fromkeys(d / sub for d in (out.absolute().parent, out.resolve().parent)
+                              for sub in ("videos", "downloads")):
+        if (base / tail).is_file():
+            return base / tail
+    return None
+
+
 def download_roots(root: Path) -> list[Path]:
     """Device folders the processed clips came from (…/downloads/<device>/), from their meta.json."""
     roots = set()
     for m in Path(root).glob("*/*/meta.json"):
         try:
-            p = Path(json.loads(m.read_text())["video"]["path"])
+            p = locate(json.loads(m.read_text())["video"]["path"], root)
         except (OSError, ValueError, KeyError):
             continue
-        if p.parent.parent.exists():
+        if p is not None:
             roots.add(p.parent.parent)
     return sorted(roots)
 
@@ -333,7 +353,7 @@ def clip_hens(run: Path) -> dict | None:
     run = Path(run)
     if not (run / "chicken_timeline.csv").exists():
         return None
-    key = [round((run / f).stat().st_mtime, 2) if (run / f).exists() else 0 for f in _HEN_SRC] + [RUN_MIN_M_S]
+    key = [int((run / f).stat().st_mtime) if (run / f).exists() else 0 for f in _HEN_SRC] + [RUN_MIN_M_S]
     cf = run / HENS_FILE
     if cf.exists():
         try:

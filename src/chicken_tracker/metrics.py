@@ -97,7 +97,7 @@ def clip_metrics(run: Path) -> dict | None:
     start = clip_start_s(run)
     if start is None or not all(p.exists() for p in need):
         return None
-    stamp = [VERSION] + [round((run / f).stat().st_mtime, 3) if (run / f).exists() else 0 for f in _SOURCES]
+    stamp = [VERSION] + [int((run / f).stat().st_mtime) if (run / f).exists() else 0 for f in _SOURCES]
     cache = run / "metrics.json"
     if cache.exists():
         try:
