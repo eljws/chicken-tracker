@@ -2,7 +2,8 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-output/
+/output
+/videos
 *.pt
 *.mp4
 *.avi

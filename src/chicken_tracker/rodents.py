@@ -223,7 +223,8 @@ def scan_status() -> dict:
 # ------------------------------------------------------------------ pictures and video of an event
 def _path(root: Path, e: dict) -> str | None:
     tl = TL.load(root) or {"clips": []}
-    return next((c["path"] for c in tl["clips"] if c["rel"] == e["file"]), None)
+    p = TL.locate(next((c["path"] for c in tl["clips"] if c["rel"] == e["file"]), None), root)
+    return str(p) if p else None
 
 
 def _safe(eid: str) -> str:
