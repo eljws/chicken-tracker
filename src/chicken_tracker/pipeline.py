@@ -65,6 +65,8 @@ def process_video(video: Path, out_root: Path, track_cfg: TrackConfig, zones: Zo
     (out_dir / "meta.json").write_text(json.dumps(
         {"video": asdict(info), "track_config": asdict(track_cfg)}, indent=2
     ))
+    from .stations import inherit_stations
+    inherit_stations(out_dir, out_root)   # feeder / water positions from the latest run
 
     cfg = A.AnalyticsConfig(fps=info.fps, vid_stride=track_cfg.vid_stride,
                             total_frames=info.frame_count, **analytics_kwargs)

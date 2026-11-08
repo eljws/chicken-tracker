@@ -63,6 +63,21 @@ def load_stations(run_dir: Path) -> list[dict]:
     return json.loads(p.read_text()) if p.exists() else []
 
 
+def inherit_stations(run_dir: Path, out_root: Path) -> Path | None:
+    """A new run with no stations gets the most recently edited ones from another run (the camera is fixed,
+    so the feeder and water stay put until you move them). Each station notes where it was copied from."""
+    run_dir, out_root = Path(run_dir), Path(out_root)
+    if (run_dir / "stations.json").exists():
+        return None
+    found = [p for p in {*out_root.glob("*/stations.json"), *out_root.parent.glob("*/*/stations.json")}
+             if p.parent.resolve() != run_dir.resolve()]
+    if not found:
+        return None
+    src = max(found, key=lambda p: p.stat().st_mtime)
+    stations = [{**s, "copied_from": str(src.parent.name)} for s in json.loads(src.read_text())]
+    return save_stations(run_dir, stations)
+
+
 def at_station(det: pd.DataFrame, box, margin: float) -> np.ndarray:
     """Per row: does the chicken's box touch the station box widened by `margin` px?"""
     x1, y1, x2, y2 = box[0] - margin, box[1] - margin, box[2] + margin, box[3] + margin
