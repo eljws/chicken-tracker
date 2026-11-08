@@ -159,7 +159,7 @@ def track_video(
         label = [model.names[c] for c in classes] if classes is not None else "all"
         print(f"[{Path(path).name}] {info.width}x{info.height} @ {info.fps:.1f}fps, "
               f"{info.frame_count} frames; tracking classes: {label}; detector on the "
-              f"{'Neural Engine' if cfg.engine == 'neural' else 'GPU'}")
+              f"{'Neural Engine' if cfg.engine == 'neural' else 'GPU' if cfg.device not in (None, 'cpu') else 'default device'}")
 
     writer = None
     if annotated_out is not None:
