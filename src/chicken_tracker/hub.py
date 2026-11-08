@@ -451,6 +451,13 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
 
         def _allowed(self) -> bool:
             """The outside port (server.gate set) needs the login; the local one doesn't."""
+            if getattr(self.server, "lan_only", False):   # --lan-open: no login, home network only
+                import ipaddress
+                ip = ipaddress.ip_address(self.client_address[0].removeprefix("::ffff:"))
+                if ip.is_private or ip.is_loopback or ip.is_link_local:
+                    return True
+                self._send(b"Only open to the home network.", "text/plain", 403)
+                return False
             gate = getattr(self.server, "gate", None)
             if gate is None:
                 return True
@@ -485,7 +492,8 @@ def make_handler(root: Path, dataset: Path | None = None, device: str | None = N
 
 
 def serve(root: Path = Path("output"), dataset: Path | None = Path("dataset"), port: int = 8760,
-          open_browser: bool = True, device: str | None = None, public_port: int | None = None) -> None:
+          open_browser: bool = True, device: str | None = None, public_port: int | None = None,
+          lan_open: bool = False) -> None:
     """Local page on 127.0.0.1:port. With public_port, the same pages (same handler, so the same
     naming data and undo history) also on every network address at public_port, behind the login."""
     if dataset is not None and not (Path(dataset) / "labels.json").exists():
@@ -494,7 +502,12 @@ def serve(root: Path = Path("output"), dataset: Path | None = Path("dataset"), p
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     url = f"http://127.0.0.1:{port}/"
     print(f"Chicken tracker home for {root}/ at {url}  - Ctrl+C to stop")
-    if public_port:
+    if public_port and lan_open:
+        outside = ThreadingHTTPServer(("0.0.0.0", public_port), handler)
+        outside.lan_only = True
+        threading.Thread(target=outside.serve_forever, daemon=True).start()
+        print(f"Also on port {public_port} for devices on the home network, NO login (other addresses refused)")
+    elif public_port:
         from .auth import AUTH_FILE, Gate
 
         gate = Gate()  # with no password set yet it lets nobody in; setting one takes effect at once
